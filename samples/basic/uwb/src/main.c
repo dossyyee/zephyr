@@ -23,8 +23,8 @@ LOG_MODULE_REGISTER(app);
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   1000
 
-#define DEVICE_ROLE_INITIATOR
-//#define DEVICE_ROLE_RESPONDER
+//#define DEVICE_ROLE_INITIATOR
+#define DEVICE_ROLE_RESPONDER
 
 /* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
@@ -230,6 +230,22 @@ dwt_txconfig_t txconfig_options_ch9 = {
     0x0         /*PG count*/
 };
 
+dwt_sts_cp_key_t sts_key = {
+	0x12345678,
+	0x90abcdef,
+	0xfedcba09,
+	0x87654321
+};
+
+dwt_sts_cp_iv_t sts_iv = {
+	0x00000000,
+	0x00000000,
+	0x00000000,
+	0x00000001
+};
+
+
+
 #define CPU_PROCESSING_TIME 400
 /* Length of frame according with 64mhz PRF, STS Mode 3, 8 symbol SFD, 64 length SFD, 64 length Preamble */
 #define FRAME_LENGTH_US 140
@@ -351,6 +367,7 @@ void run_responder(void)
 	int range_ok = 0;
 	printk("Staring Responder ranging\n");
 	while (1) {
+		dwt_configurestsloadiv();
 		/* turn off preamble timeout as the responder does not know when the poll is coming. */
 		dwt_setpreambledetecttimeout(0);
 		/* Clear reception timeout to start next ranging process. */
@@ -358,9 +375,11 @@ void run_responder(void)
 		/* Activate reception immediately. */
 		dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
-		printk("Waiting to system status\n");
+		printk("Waiting for system status\n");
 		/* Poll for reception of a frame or error/timeout. See NOTE 8 below. */
         	waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR), 0);
+
+		printk("Status: %x\n", status_reg);
 
 		/* check for RX good frame event */
 		if (status_reg & DWT_INT_RXFCG_BIT_MASK) {
