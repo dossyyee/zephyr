@@ -1,0 +1,29 @@
+#
+# Copyright (c) 2023 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+# config SHIELD_NRF7002EK
+# 	def_bool $(shields_list_contains,nrf7002ek)
+
+# if SHIELD_NRF7002EK && NETWORKING
+
+# configdefault MODEM
+# 	default y
+
+# configdefault MODEM_CONTEXT
+# 	default y
+
+# configdefault WIFI
+# 	default y
+
+# configdefault WIFI_NRF700X
+# 	default y
+
+# endif # SHIELD_NRF7002EK && NETWORKING
+
+config SHIELD_DWM3000EVB
+	def_bool $(shields_list_contains,dwm3000evb)
+	select NETWORKING
+	select IEEE802154

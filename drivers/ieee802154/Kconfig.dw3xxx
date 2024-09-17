@@ -1,0 +1,18 @@
+menuconfig IEEE802154_DW3XXX
+	bool "Qorvo DW3xxx Driver support"
+	default y
+	depends on DT_HAS_QORVO_DW3XXX_ENABLED
+	select SPI
+
+if IEEE802154_DW3XXX
+
+config IEEE802154_DW3XXX_INIT_PRIO
+	int "DW3XXX initialization priority"
+	default 80
+	help
+	  Set the initialization priority number. Do not mess with it unless
+	  you know what you are doing. Beware DW3XXX requires gpio and spi to
+	  be ready first (and sometime gpio should be the very first as spi
+	  might need it too). And of course it has to start before the net stack.
+
+endif 

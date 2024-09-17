@@ -1,0 +1,46 @@
+#
+#
+
+description: Decawave DW3110 802.15.4 UWB transceiver
+
+compatible: "qorvo,dw3xxx"
+
+include: spi-device.yaml
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    required: true
+    description: Interrupt pin.
+
+      The interrupt pin IRQ of DW3110 is by default active 
+      high output. If connected directly the MCU pin should 
+      be configured as active high.
+  
+  wakeup-gpios:
+    type: phandle-array
+    required: false
+    description: Wakeup pin.
+
+      Optional method of waking up DW3000 device from sleep.
+      Alternatively, wakeup form SPI can be used.
+
+  reset-gpios:
+    type: phandle-array
+    required: true
+    description: RESET pin.
+
+      The RESET pin of DW3110 is active low.
+      If connected directly the MCU pin should be configured
+      as active low. It performs 2 functions, In general it is
+      output but can also be used to reset the digital part of
+      the IC if it is driven low. It should not be driven high 
+      externally.
+
+  tx-ant-delay:
+    type: int
+    description: Transmitter antenna delay.
+
+  rx-ant-delay:
+    type: int
+    description: Receiver antenna delay.
