@@ -23,9 +23,6 @@ LOG_MODULE_REGISTER(app);
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   1000
 
-//#define DEVICE_ROLE_INITIATOR
-#define DEVICE_ROLE_RESPONDER
-
 /* The devicetree node identifier for the "led0" alias. */
 #define LED0_NODE DT_ALIAS(led0)
 
@@ -267,7 +264,6 @@ static uint32_t status_reg = 0;
 #define UUS_TO_DWT_TIME 63898
 
 // ------------ Initiator specific ------------------ All timings may need tuning
-#ifdef DEVICE_ROLE_INITIATOR
 /* Delay between frames, in UWB microseconds. */
 /* This is the delay from the end of the frame transmission to the enable of the receiver, as programmed for the DW3000's wait for response feature. */
 #define POLL_TX_TO_RESP_RX_DLY_UUS (290 + CPU_PROCESSING_TIME) 
@@ -278,23 +274,9 @@ static uint32_t status_reg = 0;
 static uint64_t poll_tx_ts;
 static uint64_t resp_rx_ts;
 static uint64_t final_tx_ts;
-#endif 
 
-// ------------ Responder specific ------------------
-#ifdef DEVICE_ROLE_RESPONDER
-/* Delay between frames, in UWB microseconds. See NOTE 4 below. */
-/* This is the delay from Frame RX timestamp to TX reply timestamp used for calculating/setting the DW3000's delayed TX function. This includes the
- * frame length of approximately 180 us with above configuration. */
-#define POLL_RX_TO_RESP_TX_DLY_UUS 900
-/* This is the delay from the end of the frame transmission to the enable of the receiver, as programmed for the DW3000's wait for response feature. */
-#define RESP_TX_TO_FINAL_RX_DLY_UUS 670
-/* Timestamps of frames transmission/reception. */
-static uint64_t poll_rx_ts;
-static uint64_t resp_tx_ts;
-static uint64_t final_rx_ts;
-#endif 
-/*----------------------------------------------------------------------------*/
-#ifdef DEVICE_ROLE_INITIATOR
+
+
 void run_inititiator(void)
 {
 	dwt_setrxaftertxdelay(POLL_TX_TO_RESP_RX_DLY_UUS);
@@ -359,104 +341,6 @@ void run_inititiator(void)
 		k_msleep(RNG_DELAY_MS);
 	}
 }
-#endif 
-
-#ifdef DEVICE_ROLE_RESPONDER
-void run_responder(void)
-{
-	int range_ok = 0;
-	printk("Staring Responder ranging\n");
-	while (1) {
-		dwt_configurestsloadiv();
-		/* turn off preamble timeout as the responder does not know when the poll is coming. */
-		dwt_setpreambledetecttimeout(0);
-		/* Clear reception timeout to start next ranging process. */
-		dwt_setrxtimeout(0);
-		/* Activate reception immediately. */
-		dwt_rxenable(DWT_START_RX_IMMEDIATE);
-
-		printk("Waiting for system status\n");
-		/* Poll for reception of a frame or error/timeout. See NOTE 8 below. */
-        	waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR), 0);
-
-		printk("Status: %x\n", status_reg);
-
-		/* check for RX good frame event */
-		if (status_reg & DWT_INT_RXFCG_BIT_MASK) {
-			printk("RX good frame recieved\n");
-			//uint16_t frame_len;
-			int goodSts = 0;    /* Used for checking STS quality in received signal */
-			int16_t stsQual;    /* This will contain STS quality index */
-			uint16_t stsStatus; /* Used to check for good STS status (no errors). */
-
-			/* Clear good RX frame event in the DW3000 status register. */
-            		dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
-
-			goodSts = dwt_readstsquality(&stsQual);
-			if ((goodSts >= 0) && (dwt_readstsstatus(&stsStatus, 0) == DWT_SUCCESS)) {
-				printk("Good sts\n");
-				uint32_t resp_tx_time;
-				int ret;
-				/* Retrieve poll reception timestamp. */
-                    		poll_rx_ts = get_rx_timestamp_u64();
-
-				/* Set send time for response. See NOTE 9 below. */
-				resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
-				dwt_setdelayedtrxtime(resp_tx_time);
-
-				/* Set expected delay and timeout for final message reception. See NOTE 4 and 5 below. */
-				dwt_setrxaftertxdelay(RESP_TX_TO_FINAL_RX_DLY_UUS);
-				dwt_setrxtimeout(RX_TIMEOUT_UUS);
-
-				/* Set preamble timeout for expected final frame from the initiator. See NOTE 6 below. */
-				dwt_setpreambledetecttimeout(PRE_TIMEOUT);
-				ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-
-				/* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. */
-				if (ret == DWT_ERROR)
-				{
-					LOG_ERR("dwt_starttx() returns an error");
-					continue;
-				}
-
-				/* Poll for reception of expected "final" frame or error/timeout. */
-                    		waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR), 0);
-
-				if (status_reg & DWT_INT_RXFCG_BIT_MASK) {
-					/* Clear good RX frame event and TX frame sent in the DW3000 status register. */
-                       			dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK | DWT_INT_TXFRS_BIT_MASK);
-					goodSts = dwt_readstsquality(&stsQual);
-					if ((goodSts >= 0) && (dwt_readstsstatus(&stsStatus, 0) == DWT_SUCCESS)) {
-						/* Retrieve response transmission and final reception timestamps. */
-                                		resp_tx_ts = get_tx_timestamp_u64();
-                                		final_rx_ts = get_rx_timestamp_u64();
-
-						printk("Ranging successful\n");
-
-						range_ok = 1;
-					}
-				} 
-				else {
-					/* Clear RX error/timeout events in the DW3000 status register. */
-					dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-				}
-			}
-		}
-		else {
-                        /* Clear RX error/timeout events in the DW3000 status register. */
-                        dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-                }
-
-
-		/* add some delay before next ranging exchange */
-		if (range_ok) {
-			range_ok = 0;
-			printk("Sleeping and restaring responder ranging\n");
-			k_msleep(RNG_DELAY_MS - 20);
-		}
-	}
-}
-#endif
 
 int main(void)
 {
@@ -504,12 +388,11 @@ int main(void)
 	/* Enable TX/RX states output on GPIOs 5 and 6 to help debug */
 	dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
 
-	#ifdef DEVICE_ROLE_INITIATOR
-		run_inititiator();
-	#endif
-	#ifdef DEVICE_ROLE_RESPONDER
-		run_responder();
-	#endif
+	dwt_configurestskey(&sts_key);
+	dwt_configurestsiv(&sts_iv);
+
+	run_inititiator();
+
 	LOG_ERR("Device not run");
 	return 0;
 }
