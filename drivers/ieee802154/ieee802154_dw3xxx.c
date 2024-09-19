@@ -375,8 +375,9 @@ static void dw3xxx_irq_handler(struct k_work* item)
 
 static void dw3xxx_hw_isr(const struct device* dev, struct gpio_callback* cb, uint32_t pins)
 {
-	struct dw3xxx_data *data = dev->data;
-	k_work_submit(&data->isr_work);
+	struct dw3xxx_data *data = CONTAINER_OF(cb, struct dw3xxx_data, irq_callback);
+
+	//k_work_submit(&data->isr_work);
 }
 
 /*----------------------------------------------------------------------------*/

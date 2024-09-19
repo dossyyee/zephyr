@@ -84,3 +84,8 @@ west-commands:
       - name: sdk
         class: Sdk
         help: manage Zephyr SDK
+  - file: scripts/west_commands/vscode.py
+    commands:
+      - name: vscode
+        class: vscode
+        help: generate vscode configuration files

@@ -275,7 +275,10 @@ static uint64_t poll_tx_ts;
 static uint64_t resp_rx_ts;
 static uint64_t final_tx_ts;
 
-
+/*
+1. 682628146
+2. 682864732
+*/
 
 void run_inititiator(void)
 {

@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
-
+ ///delete-node/ &ieee802154;
 / {
 	chosen {
 		zephyr,ieee802154     = &ieee802154;
