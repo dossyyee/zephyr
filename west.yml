@@ -23,12 +23,24 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
     - name: babblesim
       url-base: https://github.com/BabbleSim
+    - name: uwb
+      url-base: https://github.com/br101
 
   group-filter: [-babblesim, -optional]
 
   #
   # Please add items below based on alphabetical order
   projects:
+    # - name: ext_uwb
+    #   remote: uwb
+    #   repo-path: zephyr-dw3000-decadriver
+    #   revision: dbbd460397810a62af06f1a3265e5f11e16631c9
+    #   path: modules/ext_uwb
+    - name: ext_uwb_examples
+      remote: uwb
+      repo-path: zephyr-dw3000-examples
+      revision: 2a07301ff039aeb2d48c060ef38fd215f4c7ecac
+      path: modules/ext_uwb_examples      
     - name: acpica
       revision: 8d24867bc9c9d81c81eeac59391cda59333affd4
       path: modules/lib/acpica
