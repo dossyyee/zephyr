@@ -1,0 +1,8 @@
+
+
+if SHIELD_DWM3000EVB
+
+config IEEE802154_NRF5
+	default n
+
+endif

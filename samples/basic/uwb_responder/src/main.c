@@ -163,12 +163,6 @@ void waitforsysstatus(uint32_t *lo_result, uint32_t *hi_result, uint32_t lo_mask
                     break;
                 }
             }
-
-	    if (cnt >= 100) {
-		cnt = 0;
-	    	k_msleep(1);
-	    }
-
 	    cnt++;
         }
     }
@@ -229,26 +223,17 @@ dwt_txconfig_t txconfig_options_ch9 = {
     0x0         /*PG count*/
 };
 
-dwt_sts_cp_key_t sts_key = {
-	0x12345678,
-	0x90abcdef,
-	0xfedcba09,
-	0x87654321
-};
 
-dwt_sts_cp_iv_t sts_iv = {
-	0x00000000,
-	0x00000000,
-	0x00000000,
-	0x00000001
-};
+static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 };
+
+static dwt_sts_cp_iv_t sts_iv = { 0x1F9A3DE4, 0xD37EC3CA, 0xC44FA8FB, 0x362EEB34 };
 
 
-#define CPU_PROCESSING_TIME 400
+#define CPU_PROCESSING_TIME 500
 /* Length of frame according with 64mhz PRF, STS Mode 3, 8 symbol SFD, 64 length SFD, 64 length Preamble */
 #define FRAME_LENGTH_US 140
 /* Inter-ranging delay period, in milliseconds. */
-#define RNG_DELAY_MS 1000
+#define RNG_DELAY_MS 500
 /* Default antenna delay values for 64 MHz PRF. Tune these values experimentally for correct distance measurement calibration. */
 #define TX_ANT_DLY 16385
 #define RX_ANT_DLY 16385
@@ -265,7 +250,6 @@ static uint32_t status_reg = 0;
 #define UUS_TO_DWT_TIME 63898
 
 // ------------ Responder specific ------------------
-
 /* Delay between frames, in UWB microseconds. See NOTE 4 below. */
 /* This is the delay from Frame RX timestamp to TX reply timestamp used for calculating/setting the DW3000's delayed TX function. This includes the
  * frame length of approximately 180 us with above configuration. */
@@ -277,108 +261,154 @@ static uint64_t poll_rx_ts;
 static uint64_t resp_tx_ts;
 static uint64_t final_rx_ts;
 
-void run_responder(void)
+static uint8_t rx_count = 0;
+static bool rx_event = false;
+static bool rx_success = false;
+
+/* Declaration of static functions. */
+static void rx_ok_cb(const dwt_cb_data_t *cb_data);
+static void rx_to_cb(const dwt_cb_data_t *cb_data);
+static void rx_err_cb(const dwt_cb_data_t *cb_data);
+static void tx_conf_cb(const dwt_cb_data_t *cb_data);
+
+// void compute_resp_tx_frame_times(void)
+// {
+//     /*
+//      * Different sized frames require different time delays.
+//      */
+//     uint32_t delay_time = POLL_RX_TO_RESP_TX_DLY_UUS + 0 + 0;
+
+//     /* Length of the STS effects the size of the frame also.
+//      * This means the delay required is greater for larger STS lengths. */
+//     delay_time += ((1 << (config.stsLength + 2)) * 8);
+
+//     dwt_setdelayedtrxtime((uint32_t)((delay_time * UUS_TO_DWT_TIME) >> 8));
+// }
+
+// void run_responder(void)
+// {
+// 	int16_t stsQual;    /* This will contain STS quality index and status */
+// 	int goodSts = 0;    /* Used for checking STS quality in received signal */
+// 	uint16_t stsStatus; /* Used to check for good STS status (no errors). */
+// 	uint8_t messageFlag = 0; /* Used to track whether STS count should be reinitialised or not */
+
+// 	printk("Staring Responder ranging\n");
+
+//     	dwt_setrxaftertxdelay(RESP_TX_TO_FINAL_RX_DLY_UUS);
+// 	dwt_configurestskey(&sts_key);
+
+// 	while (1) {
+
+// 		if (!messageFlag) {
+// 			dwt_configurestsiv(&sts_iv);
+// 			dwt_configurestsloadiv();
+// 			dwt_rxenable(DWT_START_RX_IMMEDIATE);
+// 		} else {
+// 			//printk("Message 1 recieved\n");
+// 		}
+
+// 		waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR), 0);
+// 		goodSts = dwt_readstsquality(&stsQual);
+
+// 		// printk("%08x\n", status_reg);
+// 		// k_msleep(2);
+
+// 		if ((goodSts >= 0) && (dwt_readstsstatus(&stsStatus, 0) == DWT_SUCCESS)) {
+
+// 			/* Recieved a good message. This is the first Rx event of he ranging transaction */
+// 			if (!messageFlag) {
+// 				uint32_t resp_tx_time;
+// 				int ret;
+
+// 				dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
+// 				poll_rx_ts = get_rx_timestamp_u64();
+
+// 				resp_tx_time = (poll_rx_ts                              /* Received timestamp value */
+// 						+ ((POLL_RX_TO_RESP_TX_DLY_UUS          /* Set delay time */
+// 						+ 0                			/* Added delay time for data rate set */
+// 						+ 0					/* Added delay for TX preamble length */
+// 						+ ((1 << (config.stsLength + 2)) * 8)) 	/* Added delay for STS length */
+// 						* UUS_TO_DWT_TIME))
+// 					>> 8;
+
+// 				dwt_setdelayedtrxtime(resp_tx_time);
+// 				resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+
+// 				dwt_setrxaftertxdelay(100);
+// 				ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
+
+// 				if (ret == DWT_SUCCESS) {
+// 					/* Poll DW IC until TX frame sent event set. See NOTE 6 below. */
+// 					waitforsysstatus(NULL, NULL, DWT_INT_TXFRS_BIT_MASK, 0);
+// 					/* Clear TXFRS event. */
+// 					dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+
+// 					/*
+// 						* This flag is set high here so that we do not reset the STS count before receiving
+// 						* the final message from the initiator. Otherwise, the STS count would be bad and
+// 						* we would be unable to receive it.
+// 						*/
+// 					messageFlag = 1;
+// 				}
+// 			/* Recieved a good message. This is the last Rx of the ranging transaction */
+// 			} else {
+// 				dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
+// 				/* Retrieve response transmission and final reception timestamps. */
+// 				resp_tx_ts = get_tx_timestamp_u64();
+// 				final_rx_ts = get_rx_timestamp_u64();
+
+// 				/* Display computed distance on UART. */
+// 				//printf("Ranging Successful\n");
+// 				/* as DS-TWR initiator is waiting for RNG_DELAY_MS before next poll transmission
+// 				* we can add a delay here before RX is re-enabled again
+// 				*/
+
+// 				k_msleep(RNG_DELAY_MS - 10); // start couple of ms earlier
+
+// 				messageFlag = 0;
+// 			}
+// 		} else {
+// 			dwt_writesysstatuslo(SYS_STATUS_ALL_RX_ERR);
+// 			if (goodSts < 0) {
+// 				//printk("Bad STS\n");
+// 			} else {
+// 				//printk("Bad sysStatus\n");
+// 			}
+// 			/* Recieved frame was of poor quality and unuseable */
+// 			messageFlag = 0;
+// 		}
+// 	}
+// }
+
+void run_responder_irq(void)
 {
-	int range_ok = 0;
-	printk("Staring Responder ranging\n");
 	while (1) {
-		dwt_configurestsloadiv();
-		/* turn off preamble timeout as the responder does not know when the poll is coming. */
-		dwt_setpreambledetecttimeout(0);
-		/* Clear reception timeout to start next ranging process. */
-		dwt_setrxtimeout(0);
-		/* Activate reception immediately. */
-		dwt_rxenable(DWT_START_RX_IMMEDIATE);
-
-		printk("Waiting for system status\n");
-		/* Poll for reception of a frame or error/timeout. See NOTE 8 below. */
-        	waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR), 0);
-
-		printk("Status: %x\n", status_reg);
-
-		/* check for RX good frame event */
-		if (status_reg & DWT_INT_RXFCG_BIT_MASK) {
-			printk("RX good frame recieved\n");
-			//uint16_t frame_len;
-			int goodSts = 0;    /* Used for checking STS quality in received signal */
-			int16_t stsQual;    /* This will contain STS quality index */
-			uint16_t stsStatus; /* Used to check for good STS status (no errors). */
-
-			/* Clear good RX frame event in the DW3000 status register. */
-            		dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
-
-			goodSts = dwt_readstsquality(&stsQual);
-			if ((goodSts >= 0) && (dwt_readstsstatus(&stsStatus, 0) == DWT_SUCCESS)) {
-				printk("Good sts\n");
-				uint32_t resp_tx_time;
-				int ret;
-				/* Retrieve poll reception timestamp. */
-                    		poll_rx_ts = get_rx_timestamp_u64();
-
-				/* Set send time for response. See NOTE 9 below. */
-				resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
-				dwt_setdelayedtrxtime(resp_tx_time);
-
-				/* Set expected delay and timeout for final message reception. See NOTE 4 and 5 below. */
-				dwt_setrxaftertxdelay(RESP_TX_TO_FINAL_RX_DLY_UUS);
-				dwt_setrxtimeout(RX_TIMEOUT_UUS);
-
-				/* Set preamble timeout for expected final frame from the initiator. See NOTE 6 below. */
-				dwt_setpreambledetecttimeout(PRE_TIMEOUT);
-				ret = dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
-
-				/* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. */
-				if (ret == DWT_ERROR)
-				{
-					LOG_ERR("dwt_starttx() returns an error");
-					continue;
-				}
-
-				/* Poll for reception of expected "final" frame or error/timeout. */
-                    		waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR), 0);
-
-				if (status_reg & DWT_INT_RXFCG_BIT_MASK) {
-					/* Clear good RX frame event and TX frame sent in the DW3000 status register. */
-                       			dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK | DWT_INT_TXFRS_BIT_MASK);
-					goodSts = dwt_readstsquality(&stsQual);
-					if ((goodSts >= 0) && (dwt_readstsstatus(&stsStatus, 0) == DWT_SUCCESS)) {
-						/* Retrieve response transmission and final reception timestamps. */
-                                		resp_tx_ts = get_tx_timestamp_u64();
-                                		final_rx_ts = get_rx_timestamp_u64();
-
-						printk("Ranging successful\n");
-
-						range_ok = 1;
-					}
-				} 
-				else {
-					/* Clear RX error/timeout events in the DW3000 status register. */
-					dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-				}
-			}
+		if (!rx_count) {
+			dwt_configurestsiv(&sts_iv);
+			dwt_configurestsloadiv();
+			dwt_setrxtimeout(0);
+			dwt_rxenable(DWT_START_RX_IMMEDIATE);
 		}
-		else {
-                        /* Clear RX error/timeout events in the DW3000 status register. */
-                        dwt_writesysstatuslo(SYS_STATUS_ALL_RX_TO | SYS_STATUS_ALL_RX_ERR);
-                }
 
+		// Wait for rx event
+		while (!rx_event) {
+			k_yield();
+		}
+		rx_event = false;
 
-		/* add some delay before next ranging exchange */
-		if (range_ok) {
-			range_ok = 0;
-			printk("Sleeping and restaring responder ranging\n");
-			k_msleep(RNG_DELAY_MS - 20);
+		// Delay if final rx sucessful
+		if (rx_success) {
+			rx_success = false;
+			k_msleep(RNG_DELAY_MS - 2);
 		}
 	}
 }
-
 
 int main(void)
 {
 	printk("Entering Main\n");
 	
 	int ret;
-	bool led_state = true;
 	if (!gpio_is_ready_dt(&led)) {
 		return 0;
 	}	
@@ -388,14 +418,15 @@ int main(void)
 	}
 
 
-	int32_t driver_version = dwt_apiversion();
-	printk("API Version: %x \n",driver_version);
+	// int32_t driver_version = dwt_apiversion();
+	// printk("API Version: %x \n",driver_version);
 	
 	dw_reset(uwb);
-	printk("Device Reset\n");
 	
 	int err = dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
-	printk("Probe return code: %d\n", err);
+	if (err < 0) {
+		printk("Probe Error, code: %d\n", err);
+	}
 	
 	/* Check device is in Idle_RC */
 	while (!dwt_checkidlerc()){};
@@ -404,6 +435,8 @@ int main(void)
 		LOG_ERR("DWT Init Failed.");
 		while (1) { };		// Better error management here
 	}
+
+	dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
 
 	if (dwt_configure(&config)) {
 		LOG_ERR("DWT Configuration Failed.");
@@ -419,11 +452,148 @@ int main(void)
 	/* Enable TX/RX states output on GPIOs 5 and 6 to help debug */
 	dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
 
-	dwt_configurestskey(&sts_key);
-	dwt_configurestsiv(&sts_iv);
+	dwt_setrxaftertxdelay(RESP_TX_TO_FINAL_RX_DLY_UUS);
+	dwt_setrxtimeout(0);
 
-	run_responder();
+	dwt_configurestskey(&sts_key);
+
+	// run_responder();
+
+	/* Register the call-backs (SPI CRC error callback is not used). */
+   	dwt_setcallbacks(&tx_conf_cb, &rx_ok_cb, &rx_to_cb, &rx_err_cb, NULL, NULL, NULL);
+
+    	/* Enable wanted interrupts (TX confirmation, RX good frames, RX timeouts and RX errors). */
+    	dwt_setinterrupt(DWT_INT_TXFRS_BIT_MASK | DWT_INT_RXFCG_BIT_MASK | DWT_INT_RXFTO_BIT_MASK | DWT_INT_RXPTO_BIT_MASK | DWT_INT_RXPHE_BIT_MASK
+                         | DWT_INT_RXFCE_BIT_MASK | DWT_INT_RXFSL_BIT_MASK | DWT_INT_RXSTO_BIT_MASK,
+        		0, DWT_ENABLE_INT);
+
+	dwt_writesysstatuslo(0xFFFFFFFF);
+	dw_enable_irq(uwb);
+	run_responder_irq();
 
 	LOG_ERR("Device not run");
 	return 0;
+}
+
+
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn rx_ok_cb()
+ *
+ * @brief Callback to process RX good frame events
+ *
+ * @param  cb_data  callback data
+ *
+ * @return  none
+ */
+static void rx_ok_cb(const dwt_cb_data_t *cb_data)
+{
+	(void)cb_data;
+
+	uint32_t resp_tx_time;
+	int goodSts = 0;
+	int stsToast = 0;
+	int16_t stsQual;
+	uint16_t stsStatus;
+
+	goodSts = dwt_readstsquality(&stsQual);
+	stsToast = dwt_readstsstatus(&stsStatus, 0);
+
+	if ((goodSts >= 0) && (stsToast == 0)) {
+
+		if (!rx_count) {
+			poll_rx_ts = get_rx_timestamp_u64();
+
+			resp_tx_time = (poll_rx_ts + ((POLL_RX_TO_RESP_TX_DLY_UUS + 65) * UUS_TO_DWT_TIME)) >> 8;
+			dwt_setdelayedtrxtime(resp_tx_time);
+
+			resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+
+			dwt_setrxaftertxdelay(100);//dwt_setrxaftertxdelay(RESP_TX_TO_FINAL_RX_DLY_UUS);
+			//dwt_setrxtimeout(RX_TIMEOUT_UUS);
+			//dwt_setpreambledetecttimeout(PRE_TIMEOUT);
+
+			dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
+
+			rx_count = 1;
+		} else { /* second/final rx event instance*/
+			// resp_tx_ts = get_tx_timestamp_u64();
+			final_rx_ts = get_rx_timestamp_u64();
+			rx_count = 0;
+			rx_success = true;
+
+			dwt_setrxtimeout(0);
+			dwt_setpreambledetecttimeout(0);
+		}
+
+	} else {
+		/* If any error on the sts, the ranging should be abandoned. reset rx_count to 0 */
+		rx_count = 0;
+	}
+	rx_event = true;
+	/* 
+	 * This callback will be called when an initiator has sent either an initial poll message or the final tx 
+	 * message. In the first case, the rx timestamp should be stored, the 
+	 */
+}
+
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn rx_to_cb()
+ *
+ * @brief Callback to process RX timeout events
+ *
+ * @param  cb_data  callback data
+ *
+ * @return  none
+ */
+static void rx_to_cb(const dwt_cb_data_t *cb_data)
+{
+    	(void)cb_data;
+	rx_count = 0;
+	rx_event = true;
+	dwt_setrxtimeout(0);
+	dwt_setpreambledetecttimeout(0);
+    	/* 
+     	 * Process when a response was expected but failed. For the responder, this occurs for the final rx listening
+	 * event. If this occurs, the rx_count should be reset to zero
+     	 */
+}
+
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn rx_err_cb()
+ *
+ * @brief Callback to process RX error events
+ *
+ * @param  cb_data  callback data
+ *
+ * @return  none
+ */
+static void rx_err_cb(const dwt_cb_data_t *cb_data)
+{
+    	(void)cb_data;
+	rx_count = 0;
+	rx_event = true;
+	dwt_setrxtimeout(0);
+	dwt_setpreambledetecttimeout(0);
+    	/* 
+     	 * Process when a response was recieved but has errors. For the responder, this can happen at either the first 
+	 * or the final rx event. In either case, the transaction can no longer be completed therefore rx_count reset
+     	 */
+}
+
+/*! ------------------------------------------------------------------------------------------------------------------
+ * @fn tx_conf_cb()
+ *
+ * @brief Callback to process TX confirmation events
+ *
+ * @param  cb_data  callback data
+ *
+ * @return  none
+ */
+static void tx_conf_cb(const dwt_cb_data_t *cb_data)
+{
+    (void)cb_data;
+    /*
+     * No processing required.
+     */
+
 }

@@ -8,6 +8,14 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 
+#include <zephyr/drivers/ieee802154/deca_device_api.h>
+#include <zephyr/drivers/ieee802154/deca_interface.h>
+#include <zephyr/drivers/ieee802154/deca_types.h>
+#include <zephyr/drivers/ieee802154/deca_version.h>
+
+#include <zephyr/drivers/ieee802154/ieee802154_dw3xxx.h>
+
+
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS   10000
 
@@ -21,6 +29,38 @@
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
+
+decaIrqStatus_t decamutexon(void)
+{
+	const struct dw3xxx_config *cfg = uwb->config;
+	if (cfg->irq_gpio.port) {
+		gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
+	}
+	return 1;
+}
+
+void decamutexoff(decaIrqStatus_t s)
+{
+	ARG_UNUSED(s);
+	const struct dw3xxx_config *cfg = uwb->config;
+	if (cfg->irq_gpio.port) {
+		gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_EDGE_RISING);
+	}
+}
+
+void deca_sleep(unsigned int time_ms) {
+	k_msleep(time_ms);
+}
+
+void deca_usleep(unsigned long time_us) {
+
+	if  (time_us <= UINT16_MAX) {
+		k_busy_wait((uint32_t)time_us);
+	}
+	else {
+		k_msleep((int32_t)(time_us >> 10));
+	}
+}
 
 int main(void)
 {
