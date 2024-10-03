@@ -52,7 +52,7 @@ int main(void)
 	dw3xxx_configure_device(uwb, RANGING_INITIATOR, HRP_UWB_PHY_CHANNEL_9);
 
 	dw_enable_irq(uwb);
-	run_initiator_forever();
+	run_initiator_forever(uwb);
 
 
 	LOG_ERR("Device not run");

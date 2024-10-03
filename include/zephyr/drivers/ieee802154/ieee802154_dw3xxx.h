@@ -17,7 +17,7 @@
 /* Time periods to tune */
 #define PREAMBLE_HUNT 50        // Desired time for preamble hunt, can be minimised to zero
 #define TX_CFG_TIME 300            // Time of dw3000 to process TX start + a buffer period
-#define R_CPU_PROCESSING 500    // Time from interrupt reception to start tx command
+#define R_CPU_PROCESSING 494    // Time from interrupt reception to start tx command
 #define I_CPU_PROCESSING 500    // Time from interrupt reception to start tx (command)
 
 #define RX_TIMEOUT US_TO_UUS(300)          // Time after rx wakeup to call timout error
@@ -35,6 +35,9 @@
 
 #define HRP_UWB_PHY_CHANNEL_5 5
 #define HRP_UWB_PHY_CHANNEL_9 9
+
+#define RX_EVENT_ERROR	-1
+#define RX_EVENT_OK	0
 struct dw_isr_callbacks {
 	void (*cbTxDone)(const dwt_cb_data_t*);
 	void (*cbRxOk)(const dwt_cb_data_t*);
@@ -72,6 +75,7 @@ struct dw3xxx_data {
 	struct gpio_callback irq_callback;
         struct k_work isr_work;
 	struct k_poll_signal irq_signal;
+        struct k_poll_signal rx_event;
 
         dwt_config_t phy_cfg;
         dwt_txconfig_t tx_pwr_cfg;
@@ -193,5 +197,5 @@ void dw_disable_irq(const struct device* dev);
 int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel);
 
 // Placeholder unctions for demo
-void run_initiator_forever(void);
+void run_initiator_forever(const struct device* dev) ;
 void run_responder_forever(void);

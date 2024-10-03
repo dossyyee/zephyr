@@ -37,12 +37,13 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 #define DW3000_GET_RANGING_PHY_CONFIG(channel) (dwt_config_t) { 	\
 	.chan = (channel), 						\
 	.txPreambLength = DWT_PLEN_64,					\
-	.rxPAC = DWT_PAC4, 						\
+	.rxPAC = DWT_PAC8, 						\
 	.txCode = 9, 							\
-	.sfdType = 9, 							\
-	.dataRate = DWT_SFD_IEEE_4Z, 					\
-	.phrMode = DWT_BR_6M8, 						\
-	.phrRate = DWT_PHRMODE_STD, 					\
+	.rxCode = 9, 							\
+	.sfdType = DWT_SFD_IEEE_4Z, 					\
+	.dataRate = DWT_BR_6M8, 					\
+	.phrMode = DWT_PHRMODE_STD, 					\
+	.phrRate = DWT_PHRRATE_STD, 					\
 	.sfdTO = (64 + 1 + 8 - 8), 					\
 	.stsMode = DWT_STS_MODE_ND, 					\
 	.stsLength = DWT_STS_LEN_64, 					\
@@ -75,28 +76,6 @@ static uint8_t inter_rx_buf[MAX_DATA_BUF_LEN] = {0};
 static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 }; // implement set_sts_key func
 static dwt_sts_cp_iv_t sts_iv = { 0x1F9A3DE4, 0xD37EC3CA, 0xC44FA8FB, 0x362EEB34 };
 
-
-dwt_txconfig_t tx_pwr_cfg_default = {
-    0x34,       /* PG delay. */
-    0xfdfdfdfd, /* TX power. */
-    0x0         /*PG count*/
-};
-
-static dwt_config_t phy_cfg_default = {
-	9,			/* Channel number 9. */
-	DWT_PLEN_64,		/* Preamble length. Used in TX only. */
-	DWT_PAC4,		/* Preamble acquisition chunk size. Used in RX only. DWT_PAC4 alt */
-	9,			/* TX preamble code. Used in TX only. */
-	9,			/* RX preamble code. Used in RX only. */
-	DWT_SFD_IEEE_4Z,	/* 4z 8 symbol SDF type */
-	DWT_BR_6M8,		/* Data rate. Not applicable for STS mode 3 */
-	DWT_PHRMODE_STD,	/* PHY header mode. */
-	DWT_PHRRATE_STD,	/* PHY header rate. */
-	(64 + 1 + 8 - 8),	/* SFD timeout (preamble length + 1 + SFD length - PAC size). Used in RX only. */
-	DWT_STS_MODE_ND,	/* STS mode 3. */
-	DWT_STS_LEN_64,		/* STS length see allowed values in Enum dwt_sts_lengths_e */
-	DWT_PDOA_M0		/* PDOA mode off */
-};
 
 uint32_t rng_irq_mask_lo = DWT_INT_TXFRS_BIT_MASK | 
 			DWT_INT_RXFCG_BIT_MASK | 
@@ -449,7 +428,7 @@ void dw_wakeup(const struct device *dev)
 	const struct dw3xxx_config *cfg = dev->config;
 	printk("wakeup\n");
 
-	if (&cfg->wkp_gpio.port) {
+	if (&cfg->wkp_gpio.port != NULL) {
 		LOG_INF("GPIO_WAKEUP");
 		gpio_pin_set_dt(&cfg->wkp_gpio, GPIO_OUTPUT_ACTIVE);
 		k_sleep(K_USEC(200));
@@ -526,6 +505,7 @@ static int dw3xxx_set_device_ranging(const struct device* dev)
 	struct dw3xxx_data *data  = dev->data;
         dwt_config_t *phy_cfg = &data->phy_cfg;
         dwt_txconfig_t *tx_pwr_cfg = &data->tx_pwr_cfg;
+	while (!dwt_checkidlerc()){};
 
 	// should check here IDLE RC
 	if (dwt_initialise(DWT_DW_INIT) == DWT_ERROR) {
@@ -533,9 +513,8 @@ static int dw3xxx_set_device_ranging(const struct device* dev)
 		return -EIO;		// Check that the error code is most appropriate
 	}
 
-	// Set up debug options including LEDs
+	// Set up including LEDs
 	dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
-	dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
 
 	if (dwt_configure(phy_cfg)) {
 		LOG_ERR("DWT Configuration Failed.");
@@ -548,19 +527,24 @@ static int dw3xxx_set_device_ranging(const struct device* dev)
 	dwt_setrxantennadelay(RX_ANT_DLY);
 	dwt_settxantennadelay(TX_ANT_DLY);
 
+	// Stuff
+	dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
+
 	// Set the appropriate delays
 	if (data->role == RANGING_INITIATOR) {
 		dwt_setrxaftertxdelay(INITIATOR_RX_WAKEUP_DELAY);
 		dwt_setrxtimeout(RX_TIMEOUT);
-		dwt_setpreambledetecttimeout(PREAMBLE_TIMEOUT);
+		// dwt_setpreambledetecttimeout(PREAMBLE_TIMEOUT);
 		
 	} else if ((data->role == RANGING_RESPONDER)) {
 		dwt_setrxaftertxdelay(RESPONDER_RX_WAKEUP_DELAY);
 		dwt_setrxtimeout(0);
-		dwt_setpreambledetecttimeout(0);
+		// dwt_setpreambledetecttimeout(PREAMBLE_TIMEOUT);
 	}
 
 	dwt_configurestskey(&sts_key);
+	dwt_configurestsiv(&sts_iv);
+	dwt_configurestsloadiv();
 
 	dw3xxx_update_callbacks(dev);
 	dw3xxx_update_interrupts(dev);
@@ -628,22 +612,51 @@ static uint64_t poll_tx_ts;
 static uint64_t resp_rx_ts;
 static uint64_t final_tx_ts;
 
-void run_initiator_forever(void) 
+// void run_initiator_forever(void) 
+// {
+// 	while (1) {
+// 		dwt_configurestsiv(&sts_iv);
+// 		dwt_configurestsloadiv();
+
+// 		dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+// 		rx_event = false;
+
+// 		// Hold until rx event or timeout
+// 		while (!rx_event) { 
+// 			k_yield();
+// 		};
+
+// 		// Sleep for ranging delay period
+// 		rx_event = false;
+// 		k_msleep(RNG_DELAY_MS);
+// 	}
+// }
+
+void run_initiator_forever(const struct device* dev) 
 {
+	struct dw3xxx_data *data  = dev->data;
+	struct k_poll_event event[1] = {
+        	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
+                                 	 K_POLL_MODE_NOTIFY_ONLY,
+                                 	 &data->rx_event),
+    	};
+	int signaled, result;
+
 	while (1) {
+		// Load counter and send a poll
 		dwt_configurestsiv(&sts_iv);
 		dwt_configurestsloadiv();
-
 		dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
-		rx_event = false;
 
 		// Hold until rx event or timeout
-		while (!rx_event) { 
-			k_yield();
-		};
+		k_poll(event, 1, K_FOREVER);
+		k_poll_signal_check(&data->rx_event, &signaled, &result);
 
+		if (signaled && (result == RX_EVENT_OK)) {
+			/* Add processing here for processing rx OK event. In this situation the ranging transaction 
+			completed successfully and timestamps can be packaged and shipped off to whoever wants them */
+		}
 		// Sleep for ranging delay period
-		rx_event = false;
 		k_msleep(RNG_DELAY_MS);
 	}
 }
@@ -651,6 +664,7 @@ void run_initiator_forever(void)
 static void initiator_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
 	(void)cb_data;
+	struct dw3xxx_data *data  = uwb->data;
 
 	uint32_t final_tx_time;
 	int goodSts = 0;
@@ -660,9 +674,6 @@ static void initiator_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
 
 	goodSts = dwt_readstsquality(&stsQual);
 	stsToast = dwt_readstsstatus(&stsStatus, 0);
-
-
-	LOG_INF("RX");
 
 	if ((goodSts >= 0) && (stsToast == 0)) {
 		poll_tx_ts = get_tx_timestamp_u64();
@@ -677,26 +688,28 @@ static void initiator_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
 		final_tx_ts = (((uint64_t)(final_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
 		// uint64_t log_time1 = timing_counter_get();
+		k_poll_signal_raise(&data->irq_signal,RX_EVENT_OK);
+
 		LOG_INF("%llu %llu %llu", poll_tx_ts, resp_rx_ts, final_tx_ts);
 		// uint64_t log_time2 = timing_counter_get();
 		// LOG_INF("Log Time: %llu µs", timing_cycles_to_ns(log_time2 - log_time1)/1000);
+	} else {
+		k_poll_signal_raise(&data->irq_signal,RX_EVENT_ERROR);
 	}
-	rx_event = true;
 }
 
 static void initiator_rangeing_rx_to_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
-	LOG_INF("TO");
-	rx_event = true;
+	struct dw3xxx_data *data  = uwb->data;
+	k_poll_signal_raise(&data->irq_signal,RX_EVENT_ERROR);
 }
 
 static void initiator_rangeing_rx_err_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
-
-	LOG_INF("ERR");
-	rx_event = true;
+	struct dw3xxx_data *data  = uwb->data;
+	k_poll_signal_raise(&data->irq_signal,RX_EVENT_ERROR);
 }
 
 static void initiator_rangeing_tx_done_cb(const dwt_cb_data_t *cb_data)
@@ -724,7 +737,7 @@ void run_responder_forever(void)
 
 		// Wait for rx event
 		while (!rx_event) {
-			k_msleep(1);
+			k_yield();
 		}
 		rx_event = false;
 
@@ -749,8 +762,6 @@ static void responder_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
 	goodSts = dwt_readstsquality(&stsQual);
 	stsToast = dwt_readstsstatus(&stsStatus, 0);
 
-	LOG_INF("RX");
-
 	if ((goodSts >= 0) && (stsToast == 0)) {
 
 		if (!rx_count) {
@@ -764,7 +775,6 @@ static void responder_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
 			dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
 
 			//dwt_setrxtimeout(RX_TIMEOUT_UUS);
-			//dwt_setpreambledetecttimeout(PRE_TIMEOUT);
 			resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
 			rx_count = 1;
@@ -811,35 +821,33 @@ static int dw3xxx_probe(const struct device *dev)
 {
 	int rc;
 	
-	/* Query device ID */
-	uint8_t id_buf[sizeof(uint32_t)] = {0};
-	uint32_t dev_id = 0;
+	// /* Query device ID */
+	// uint8_t id_buf[sizeof(uint32_t)] = {0};
+	// uint32_t dev_id = 0;
 
-	/* Only short address required for device ID query */
-	rc = dw_short_addr_read(dev, GEN_CFG_AES_0, sizeof(uint32_t), id_buf);
-	if (rc < 0) {
-		LOG_ERR("Could not read DEV_ID");
-		goto release;
-	}
+	// /* Only short address required for device ID query */
+	// rc = dw_short_addr_read(dev, GEN_CFG_AES_0, sizeof(uint32_t), id_buf);
+	// if (rc < 0) {
+	// 	LOG_ERR("Could not read DEV_ID");
+	// 	goto release;
+	// }
 
-	dev_id = sys_get_le32(id_buf);
+	// dev_id = sys_get_le32(id_buf);
 
-	// TODO : write a better device ID check that isnt so magical
-	if ((dev_id & 0xFFFFFF0F) != 0xDECA0302) {
-		LOG_ERR("Incorrect DEV_ID found");
-		goto release;
-	}
+	// // TODO : write a better device ID check that isnt so magical
+	// if ((dev_id & 0xFFFFFF0F) != 0xDECA0302) {
+	// 	LOG_ERR("Incorrect DEV_ID found");
+	// 	goto release;
+	// }
 
-	printk("DEV_ID: %08X\n", dev_id);
+	// printk("DEV_ID: %08X\n", dev_id);
 
 	dw_reset(uwb);
-	int err = dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
-	if (err < 0) {
-		printk("Probe Error, code: %d\n", err);
+	rc = dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
+	if (rc < 0) {
+		printk("Probe Error, code: %d\n", rc);
 	}
 
-release:
-	
 	return rc;
 }
 
@@ -874,19 +882,10 @@ int dw3xxx_init(const struct device *dev)
 	struct dw3xxx_data *data = dev->data;
     	int rc = 0;
 
-	//printk("DWT_CTRL: %08x\n", ARM_CM_DWT_CTRL);
-	//printk("DEMCR: %08x\n", ARM_CM_DEMCR);
-
-	/* Enabling dwt timing debug shenanigans */
-	// if (ARM_CM_DWT_CTRL != 0) {        // See if DWT is available. tbh this isnt really what this check does
-	// 	ARM_CM_DEMCR      |= 1 << 24;  // Enable DWT and ITM blocks
-	// 	ARM_CM_DWT_CYCCNT  = 0;
-	// 	ARM_CM_DWT_CTRL   |= 1 << 0;   // Enable cyccnt
-	// }
-
 	printk("DW3xxx init\n");
 
 	//k_poll_signal_init(&data->irq_signal);
+	k_poll_signal_init(&data->rx_event);
 
 	if (!spi_is_ready_dt(&cfg->bus)) {
 		LOG_ERR("SPI bus not ready %s", cfg->bus.bus->name);
