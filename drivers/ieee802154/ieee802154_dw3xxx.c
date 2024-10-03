@@ -26,30 +26,192 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 
 #include <zephyr/drivers/ieee802154/ieee802154_dw3xxx.h>
 #include <zephyr/drivers/ieee802154/deca_device_api.h>
+#include <zephyr/drivers/ieee802154/deca_interface.h>
+#include <zephyr/drivers/ieee802154/deca_types.h>
+#include <zephyr/drivers/ieee802154/deca_version.h>
 
 /* Private Defines -----------------------------------------------------------*/
 #define MAX_DATA_BUF_LEN 200
+#define RNG_DELAY_MS 500
 
-#define  ARM_CM_DEMCR      (*(uint32_t *)0xE000EDFC)
-#define  ARM_CM_DWT_CTRL   (*(uint32_t *)0xE0001000)
-#define  ARM_CM_DWT_CYCCNT (*(uint32_t *)0xE0001004)
+#define DW3000_GET_RANGING_PHY_CONFIG(channel) (dwt_config_t) { 	\
+	.chan = (channel), 						\
+	.txPreambLength = DWT_PLEN_64,					\
+	.rxPAC = DWT_PAC4, 						\
+	.txCode = 9, 							\
+	.sfdType = 9, 							\
+	.dataRate = DWT_SFD_IEEE_4Z, 					\
+	.phrMode = DWT_BR_6M8, 						\
+	.phrRate = DWT_PHRMODE_STD, 					\
+	.sfdTO = (64 + 1 + 8 - 8), 					\
+	.stsMode = DWT_STS_MODE_ND, 					\
+	.stsLength = DWT_STS_LEN_64, 					\
+	.pdoaMode = DWT_PDOA_M0, 					\
+}
+
+#define DW3000_GET_RANGING_TXPWR_CONFIG(channel) (dwt_txconfig_t) {		\
+	.PGdly = 0x34,								\
+        .power = ((channel) == HRP_UWB_PHY_CHANNEL_5) ? 0xfdfdfdfd : 0xfefefefe,\
+        .PGcount = 0,								\
+}
 
 /* Type Definitions ----------------------------------------------------------*/
 
 /* Function Declarations -----------------------------------------------------*/
+
+/* callbacks */
+static void initiator_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data);
+static void initiator_rangeing_rx_to_cb(const dwt_cb_data_t *cb_data);
+static void initiator_rangeing_rx_err_cb(const dwt_cb_data_t *cb_data);
+static void initiator_rangeing_tx_done_cb(const dwt_cb_data_t *cb_data);
+static void responder_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data);
+static void responder_rangeing_rx_to_cb(const dwt_cb_data_t *cb_data);
+static void responder_rangeing_rx_err_cb(const dwt_cb_data_t *cb_data);
+static void responder_rangeing_tx_done_cb(const dwt_cb_data_t *cb_data);
+
 static uint8_t inter_tx_buf[MAX_DATA_BUF_LEN] = {0};
 static uint8_t inter_rx_buf[MAX_DATA_BUF_LEN] = {0};
 
-static uint32_t  start;
-static uint32_t  stop;
-static uint32_t  delta;
+static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 }; // implement set_sts_key func
+static dwt_sts_cp_iv_t sts_iv = { 0x1F9A3DE4, 0xD37EC3CA, 0xC44FA8FB, 0x362EEB34 };
 
+
+dwt_txconfig_t tx_pwr_cfg_default = {
+    0x34,       /* PG delay. */
+    0xfdfdfdfd, /* TX power. */
+    0x0         /*PG count*/
+};
+
+static dwt_config_t phy_cfg_default = {
+	9,			/* Channel number 9. */
+	DWT_PLEN_64,		/* Preamble length. Used in TX only. */
+	DWT_PAC4,		/* Preamble acquisition chunk size. Used in RX only. DWT_PAC4 alt */
+	9,			/* TX preamble code. Used in TX only. */
+	9,			/* RX preamble code. Used in RX only. */
+	DWT_SFD_IEEE_4Z,	/* 4z 8 symbol SDF type */
+	DWT_BR_6M8,		/* Data rate. Not applicable for STS mode 3 */
+	DWT_PHRMODE_STD,	/* PHY header mode. */
+	DWT_PHRRATE_STD,	/* PHY header rate. */
+	(64 + 1 + 8 - 8),	/* SFD timeout (preamble length + 1 + SFD length - PAC size). Used in RX only. */
+	DWT_STS_MODE_ND,	/* STS mode 3. */
+	DWT_STS_LEN_64,		/* STS length see allowed values in Enum dwt_sts_lengths_e */
+	DWT_PDOA_M0		/* PDOA mode off */
+};
+
+uint32_t rng_irq_mask_lo = DWT_INT_TXFRS_BIT_MASK | 
+			DWT_INT_RXFCG_BIT_MASK | 
+			DWT_INT_RXFTO_BIT_MASK | 
+			DWT_INT_RXPTO_BIT_MASK | 
+			DWT_INT_RXPHE_BIT_MASK |
+			DWT_INT_RXFCE_BIT_MASK | 
+			DWT_INT_RXFSL_BIT_MASK | 
+			DWT_INT_RXSTO_BIT_MASK;
+
+uint32_t rng_irq_mask_hi = 0;
 
 /* Private Variables ---------------------------------------------------------*/
-
+static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
 
 /*----------------------------------------------------------------------------*/
+/* Qorvo API interface functions */
+int readfromspi(uint16_t headerLength, uint8_t *headerBuffer, uint16_t readlength, uint8_t *readBuffer)
+{
+	return dw_spi_read(uwb, headerLength, headerBuffer, readlength, readBuffer);
+}
+int writetospi(uint16_t headerLength, const uint8_t *headerBuffer, uint16_t bodyLength, const uint8_t *bodyBuffer)
+{
+	return dw_spi_write(uwb, headerLength, headerBuffer, bodyLength, bodyBuffer);
+}
+int writetospiwithcrc(uint16_t headerLength, const uint8_t *headerBuffer, uint16_t bodyLength, const uint8_t *bodyBuffer, uint8_t crc8)
+{
+	return 0;
+}
+void setslowrate(void) 
+{
+	return;
+}
+void setfastrate(void) 
+{
+	return;
+}
+void wakeup_device_with_io(void)
+{
+	dw_wakeup(uwb);
+}
+decaIrqStatus_t decamutexon(void)
+{
+	const struct dw3xxx_config *cfg = uwb->config;
+	if (cfg->irq_gpio.port) {
+		gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
+	}
+	return 1;
+}
+void decamutexoff(decaIrqStatus_t s)
+{
+	ARG_UNUSED(s);
+	const struct dw3xxx_config *cfg = uwb->config;
+	if (cfg->irq_gpio.port) {
+		gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_EDGE_RISING);
+	}
+}
+void deca_sleep(unsigned int time_ms) {
+	k_msleep(time_ms);
+}
+void deca_usleep(unsigned long time_us) {
 
+	if  (time_us <= UINT16_MAX) {
+		k_busy_wait((uint32_t)time_us);
+	}
+	else {
+		k_msleep((int32_t)(time_us >> 10));
+	}
+}
+
+uint64_t get_tx_timestamp_u64(void)
+{
+    uint8_t ts_tab[5];
+    uint64_t ts = 0;
+    int8_t i;
+    dwt_readtxtimestamp(ts_tab);
+    for (i = 4; i >= 0; i--)
+    {
+        ts <<= 8;
+        ts |= ts_tab[i];
+    }
+    return ts;
+}
+
+uint64_t get_rx_timestamp_u64(void)
+{
+    uint8_t ts_tab[5];
+    uint64_t ts = 0;
+    int8_t i;
+    dwt_readrxtimestamp(ts_tab);
+    for (i = 4; i >= 0; i--)
+    {
+        ts <<= 8;
+        ts |= ts_tab[i];
+    }
+    return ts;
+}
+
+/* Qorvo variables */
+static const struct dwt_spi_s dw3000_spi_fct = {
+    .readfromspi = readfromspi,
+    .writetospi = writetospi,
+    .writetospiwithcrc = writetospiwithcrc,
+    .setslowrate = setslowrate,
+    .setfastrate = setfastrate,
+};
+
+const struct dwt_probe_s dw3000_probe_interf = 
+{
+    .dw = NULL,
+    .spi = (void*)&dw3000_spi_fct,
+    .wakeup_device_with_io = wakeup_device_with_io,
+};
+
+/*----------------------------------------------------------------------------*/
 static void acquire_device(const struct device *dev)
 {
 	const struct dw3xxx_config *cfg = dev->config;
@@ -330,7 +492,6 @@ static void dw3xxx_irq_handler(struct k_work* item)
 static void dw3xxx_hw_isr(const struct device* dev, struct gpio_callback* cb, uint32_t pins)
 {
 	struct dw3xxx_data *data = CONTAINER_OF(cb, struct dw3xxx_data, irq_callback);
-
 	k_work_submit(&data->isr_work);
 }
 
@@ -346,13 +507,310 @@ void dw_disable_irq(const struct device* dev)
 	gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
 }
 
+static inline void dw3xxx_update_callbacks(const struct device* dev)
+{
+	struct dw3xxx_data *data  = dev->data;
+	struct dw_isr_callbacks *cbs = &data->cbs;
+	dwt_setcallbacks(cbs->cbTxDone, cbs->cbRxOk, cbs->cbRxTo, cbs->cbRxErr, cbs->cbSPIErr, cbs->cbSPIRdy, NULL);
+}
+
+static inline void dw3xxx_update_interrupts(const struct device* dev)
+{
+	struct dw3xxx_data *data  = dev->data;
+	dwt_setinterrupt(data->irq_mask_lo, data->irq_mask_hi, DWT_ENABLE_INT);
+}
+
+
+static int dw3xxx_set_device_ranging(const struct device* dev)
+{
+	struct dw3xxx_data *data  = dev->data;
+        dwt_config_t *phy_cfg = &data->phy_cfg;
+        dwt_txconfig_t *tx_pwr_cfg = &data->tx_pwr_cfg;
+
+	// should check here IDLE RC
+	if (dwt_initialise(DWT_DW_INIT) == DWT_ERROR) {
+		LOG_ERR("DWT Init Failed.");
+		return -EIO;		// Check that the error code is most appropriate
+	}
+
+	// Set up debug options including LEDs
+	dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
+	dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
+
+	if (dwt_configure(phy_cfg)) {
+		LOG_ERR("DWT Configuration Failed.");
+		return -EIO;		// Check that the error code is most appropriate
+	}
+
+	// Ensure that the tx power config is being appropriately set based on the channel in phy config
+	dwt_configuretxrf(tx_pwr_cfg);
+
+	dwt_setrxantennadelay(RX_ANT_DLY);
+	dwt_settxantennadelay(TX_ANT_DLY);
+
+	// Set the appropriate delays
+	if (data->role == RANGING_INITIATOR) {
+		dwt_setrxaftertxdelay(INITIATOR_RX_WAKEUP_DELAY);
+		dwt_setrxtimeout(RX_TIMEOUT);
+		dwt_setpreambledetecttimeout(PREAMBLE_TIMEOUT);
+		
+	} else if ((data->role == RANGING_RESPONDER)) {
+		dwt_setrxaftertxdelay(RESPONDER_RX_WAKEUP_DELAY);
+		dwt_setrxtimeout(0);
+		dwt_setpreambledetecttimeout(0);
+	}
+
+	dwt_configurestskey(&sts_key);
+
+	dw3xxx_update_callbacks(dev);
+	dw3xxx_update_interrupts(dev);
+
+	dwt_writesysstatuslo(0xFFFFFFFF);
+	return 0;
+}
+
+int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel)
+{
+	struct dw3xxx_data *data  = dev->data;
+
+	if ((channel != HRP_UWB_PHY_CHANNEL_5) && (channel != HRP_UWB_PHY_CHANNEL_9)) {
+		LOG_ERR("Invalid UWB channel %u", channel);
+		return -EINVAL;
+	}
+	
+	switch (role) {
+		case RANGING_INITIATOR:
+			data->role = role;
+			data->phy_cfg = DW3000_GET_RANGING_PHY_CONFIG(channel);
+			data->tx_pwr_cfg = DW3000_GET_RANGING_TXPWR_CONFIG(channel);
+			data->irq_mask_hi = rng_irq_mask_hi;
+			data->irq_mask_lo = rng_irq_mask_lo;
+			
+			data->cbs.cbRxOk = initiator_rangeing_rx_ok_cb;
+			data->cbs.cbRxTo = initiator_rangeing_rx_to_cb;
+			data->cbs.cbRxErr = initiator_rangeing_rx_err_cb;
+			data->cbs.cbTxDone = initiator_rangeing_tx_done_cb;
+			data->cbs.cbSPIErr = NULL;
+			data->cbs.cbSPIRdy = NULL;
+			dw3xxx_set_device_ranging(dev);
+			break;
+		case RANGING_RESPONDER:
+			data->role = role;
+			data->phy_cfg = DW3000_GET_RANGING_PHY_CONFIG(channel);
+			data->tx_pwr_cfg = DW3000_GET_RANGING_TXPWR_CONFIG(channel);
+			data->irq_mask_hi = rng_irq_mask_hi;
+			data->irq_mask_lo = rng_irq_mask_lo;
+			
+			data->cbs.cbRxOk = responder_rangeing_rx_ok_cb;
+			data->cbs.cbRxTo = responder_rangeing_rx_to_cb;
+			data->cbs.cbRxErr = responder_rangeing_rx_err_cb;
+			data->cbs.cbTxDone = responder_rangeing_tx_done_cb;
+			data->cbs.cbSPIErr = NULL;
+			data->cbs.cbSPIRdy = NULL;
+			dw3xxx_set_device_ranging(dev);
+			break;
+		case TIME_SYNC_CONTROLER:
+			break;
+		case TIME_SYNC_LISTNER:
+			break;
+		default:
+			LOG_ERR("Invalid role %u", role);
+			return -EINVAL;
+	}
+	return 0;
+}
+
+
+/*----------------------------------------------------------------------------*/
+/* Initiator in ranging mode callbacks */
+static bool rx_event = false;
+static uint64_t poll_tx_ts;
+static uint64_t resp_rx_ts;
+static uint64_t final_tx_ts;
+
+void run_initiator_forever(void) 
+{
+	while (1) {
+		dwt_configurestsiv(&sts_iv);
+		dwt_configurestsloadiv();
+
+		dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+		rx_event = false;
+
+		// Hold until rx event or timeout
+		while (!rx_event) { 
+			k_yield();
+		};
+
+		// Sleep for ranging delay period
+		rx_event = false;
+		k_msleep(RNG_DELAY_MS);
+	}
+}
+
+static void initiator_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
+{
+	(void)cb_data;
+
+	uint32_t final_tx_time;
+	int goodSts = 0;
+	int stsToast = 0;
+	int16_t stsQual;
+	uint16_t stsStatus;
+
+	goodSts = dwt_readstsquality(&stsQual);
+	stsToast = dwt_readstsstatus(&stsStatus, 0);
+
+
+	LOG_INF("RX");
+
+	if ((goodSts >= 0) && (stsToast == 0)) {
+		poll_tx_ts = get_tx_timestamp_u64();
+		resp_rx_ts = get_rx_timestamp_u64();
+
+		// final_tx_time = (resp_rx_ts + (RESP_RX_TO_FINAL_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
+		final_tx_time = (resp_rx_ts >> 8) + INITIATOR_DETERMINISTIC_DELAY;
+		dwt_setdelayedtrxtime(final_tx_time);
+
+		dwt_starttx(DWT_START_TX_DELAYED);
+
+		final_tx_ts = (((uint64_t)(final_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+
+		// uint64_t log_time1 = timing_counter_get();
+		LOG_INF("%llu %llu %llu", poll_tx_ts, resp_rx_ts, final_tx_ts);
+		// uint64_t log_time2 = timing_counter_get();
+		// LOG_INF("Log Time: %llu µs", timing_cycles_to_ns(log_time2 - log_time1)/1000);
+	}
+	rx_event = true;
+}
+
+static void initiator_rangeing_rx_to_cb(const dwt_cb_data_t *cb_data)
+{
+    	(void)cb_data;
+	LOG_INF("TO");
+	rx_event = true;
+}
+
+static void initiator_rangeing_rx_err_cb(const dwt_cb_data_t *cb_data)
+{
+    	(void)cb_data;
+
+	LOG_INF("ERR");
+	rx_event = true;
+}
+
+static void initiator_rangeing_tx_done_cb(const dwt_cb_data_t *cb_data)
+{
+    (void)cb_data;
+}
+
+/* Responder in ranging mode callbacks */
+
+static uint8_t rx_count = 0;
+static bool rx_success = false;
+static uint64_t poll_rx_ts;
+static uint64_t resp_tx_ts;
+static uint64_t final_rx_ts;
+
+void run_responder_forever(void)
+{
+	while (1) {
+		if (!rx_count) {
+			dwt_configurestsiv(&sts_iv);
+			dwt_configurestsloadiv();
+			dwt_setrxtimeout(0);
+			dwt_rxenable(DWT_START_RX_IMMEDIATE);
+		}
+
+		// Wait for rx event
+		while (!rx_event) {
+			k_msleep(1);
+		}
+		rx_event = false;
+
+		// Delay if final rx sucessful
+		if (rx_success) {
+			rx_success = false;
+			k_msleep(RNG_DELAY_MS - 10);
+		}
+	}
+}
+
+static void responder_rangeing_rx_ok_cb(const dwt_cb_data_t *cb_data)
+{
+	(void)cb_data;
+
+	uint32_t resp_tx_time;
+	int goodSts = 0;
+	int stsToast = 0;
+	int16_t stsQual;
+	uint16_t stsStatus;
+
+	goodSts = dwt_readstsquality(&stsQual);
+	stsToast = dwt_readstsstatus(&stsStatus, 0);
+
+	LOG_INF("RX");
+
+	if ((goodSts >= 0) && (stsToast == 0)) {
+
+		if (!rx_count) {
+			poll_rx_ts = get_rx_timestamp_u64();
+
+			resp_tx_time = (poll_rx_ts >> 8) + RESPONDER_DETERMINISTIC_DELAY;
+			dwt_setdelayedtrxtime(resp_tx_time);
+
+			dwt_setrxaftertxdelay(100);//dwt_setrxaftertxdelay(RESPONDER_RX_WAKEUP_DELAY);
+
+			dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
+
+			//dwt_setrxtimeout(RX_TIMEOUT_UUS);
+			//dwt_setpreambledetecttimeout(PRE_TIMEOUT);
+			resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+
+			rx_count = 1;
+		} else { /* second/final rx event instance*/
+			// resp_tx_ts = get_tx_timestamp_u64();
+			final_rx_ts = get_rx_timestamp_u64();
+			rx_count = 0;
+			rx_success = true;
+
+			dwt_setrxtimeout(0);
+			LOG_INF("%llu %llu %llu", poll_rx_ts, resp_tx_ts, final_rx_ts);
+		}
+
+	} else {
+		/* If any error on the sts, the ranging should be abandoned. reset rx_count to 0 */
+		rx_count = 0;
+	}
+	rx_event = true;
+}
+
+static void responder_rangeing_rx_to_cb(const dwt_cb_data_t *cb_data)
+{
+    	(void)cb_data;
+	rx_count = 0;
+	rx_event = true;
+	dwt_setrxtimeout(0);
+}
+
+static void responder_rangeing_rx_err_cb(const dwt_cb_data_t *cb_data)
+{
+    	(void)cb_data;
+	rx_count = 0;
+	rx_event = true;
+	dwt_setrxtimeout(0);
+}
+
+static void responder_rangeing_tx_done_cb(const dwt_cb_data_t *cb_data)
+{
+    (void)cb_data;
+}
 /*----------------------------------------------------------------------------*/
 
-static int dw_configure(const struct device *dev)
+static int dw3xxx_probe(const struct device *dev)
 {
 	int rc;
-	//acquire_device(dev);
-
+	
 	/* Query device ID */
 	uint8_t id_buf[sizeof(uint32_t)] = {0};
 	uint32_t dev_id = 0;
@@ -374,37 +832,14 @@ static int dw_configure(const struct device *dev)
 
 	printk("DEV_ID: %08X\n", dev_id);
 
-	/* testing write functionality */
-/* 	uint8_t eui_buf[8] = {0};
-
-	rc = dw_full_addr_read(dev, EUI_64, sizeof(eui_buf), eui_buf);
-	if (rc < 0) {
-		LOG_ERR("Reading EUI failed");
-		goto release;
-	}
-	uint64_t eui_ident = sys_get_le64(eui_buf);
-	printk("EUI: %llX\n", eui_ident);
-
-	uint64_t new_eui = 	0x1234567890ABCDEF;
-	uint8_t new_eui_buf[8] = {0};
-
-	sys_put_le64(new_eui, new_eui_buf);
-	rc = dw_full_addr_write(dev, EUI_64, sizeof(new_eui_buf), new_eui_buf);
-	if (rc < 0) {
-		LOG_ERR("Writing EUI Failed");
-		goto release;
+	dw_reset(uwb);
+	int err = dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
+	if (err < 0) {
+		printk("Probe Error, code: %d\n", err);
 	}
 
-
-	uint32_t and_mask 	= 0x00000000;
-	uint32_t or_mask 	= 0xFEDCBAFE;
-	uint64_t mask = ((uint64_t)or_mask << 32) | and_mask;
-	uint8_t mask_buf[8] = {0};
-	sys_put_le64(mask, mask_buf);
-	dw_full_addr_masked_write(dev, EUI_64, sizeof(mask_buf), mask_buf);
- */
 release:
-	//release_device(dev);
+	
 	return rc;
 }
 
@@ -420,7 +855,7 @@ static int dw3xxx_pm_control(const struct device *dev, enum pm_device_action act
 	case PM_DEVICE_ACTION_RESUME:
 	case PM_DEVICE_ACTION_TURN_ON:
         /* Query device ID */
-		dw_configure(dev);
+		dw3xxx_probe(dev);
 		break;
 	case PM_DEVICE_ACTION_TURN_OFF:
 		break;
@@ -443,11 +878,11 @@ int dw3xxx_init(const struct device *dev)
 	//printk("DEMCR: %08x\n", ARM_CM_DEMCR);
 
 	/* Enabling dwt timing debug shenanigans */
-	if (ARM_CM_DWT_CTRL != 0) {        // See if DWT is available. tbh this isnt really what this check does
-		ARM_CM_DEMCR      |= 1 << 24;  // Enable DWT and ITM blocks
-		ARM_CM_DWT_CYCCNT  = 0;
-		ARM_CM_DWT_CTRL   |= 1 << 0;   // Enable cyccnt
-	}
+	// if (ARM_CM_DWT_CTRL != 0) {        // See if DWT is available. tbh this isnt really what this check does
+	// 	ARM_CM_DEMCR      |= 1 << 24;  // Enable DWT and ITM blocks
+	// 	ARM_CM_DWT_CYCCNT  = 0;
+	// 	ARM_CM_DWT_CTRL   |= 1 << 0;   // Enable cyccnt
+	// }
 
 	printk("DW3xxx init\n");
 
@@ -494,9 +929,37 @@ int dw3xxx_init(const struct device *dev)
 	return pm_device_driver_init(dev, dw3xxx_pm_control);
 }
 
+void set_tx_power(int16_t dbm) {
+	/* Qorvo devices have a maximum power spectral density of -31 dbm/MHz. Thus at full beans and at the maximum 
+	bandwidth of 499.2 MHz, the peak output power is 0.3965 mW or -4.0173 dBm. With the plots given in section 
+	3.11.2 of the datasheet, a lookup table can be constructed. Things get more complicated when you start considering
+	the regulations where the maximum allowed average PSD is -41.3dBm/MHz when averaged over 1ms. Thus the frame
+	length, and the delay between frames must be considered to ensure regulations are met. Realistically in a ranging
+	scenario, your frame will only be sent roughly once in a millisecond.
+	(Note: the bandwidth can be tuned through PG_DELAY). */
+}
+
+// static const struct ieee802154_radio_api dwt_radio_api = {
+// 	.iface_api.init		= dwt_iface_api_init,
+
+// 	.get_capabilities	= dwt_get_capabilities,
+// 	.cca			= dwt_cca,
+// 	.set_channel		= dwt_set_channel,
+// 	.filter			= dwt_filter,
+// 	.set_txpower		= dwt_set_power,
+// 	.start			= dwt_start,
+// 	.stop			= dwt_stop,
+// 	.configure		= dwt_configure,
+// 	.ed_scan		= dwt_ed,
+// 	.tx			= dwt_tx,
+// 	.attr_get		= dwt_attr_get,
+// };
+
 /*----------------------------------------------------------------------------*/
 
 #define DW3XXX_SPI_OP_MODE SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_TRANSFER_MSB
+
+#define DW3000_GET_TIME_SYNC_PHY_CONFIG(channel)
 
 #define DW3XXX_INIT(n)                                                                      \
 	struct dw3xxx_data dw3xxx_data_##n;                                                 \
