@@ -3,25 +3,84 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/ieee802154/deca_device_api.h>
+#include <zephyr/drivers/ieee802154/deca_interface.h>
+
+/* Unit conversion macros. From Microseconds to relevant register units */
+#define US_TO_UUS(us) ((us) * 40 / 39)          // RX_FWTO register in units of 512/499.2
+#define US_TO_CUS(us) ((us) * 128 / 125)        // ACK_RESP register in units of 128 system clock cycles @ 125MHz = 1.024us
+#define US_TO_DLY_UNIT(us) ((us) * 1248 / 5)    // DX_TIME register in units of 1 / (499.2Mhz / 2) ~= 4.006ns
+
+#define TX_ANT_DLY 16385
+#define RX_ANT_DLY 16385
+
+/* Time periods to tune */
+#define PREAMBLE_HUNT 50        // Desired time for preamble hunt, can be minimised to zero
+#define TX_CFG_TIME 300            // Time of dw3000 to process TX start + a buffer period
+#define R_CPU_PROCESSING 500    // Time from interrupt reception to start tx command
+#define I_CPU_PROCESSING 500    // Time from interrupt reception to start tx (command)
+
+#define RX_TIMEOUT US_TO_UUS(300)          // Time after rx wakeup to call timout error
+#define PREAMBLE_TIMEOUT 4      // How mand PACs to wait and flag a timout
+
+#define PREAMBLE_DURATION 65
+#define STARUP_PLL 20
+
+#define RESPONDER_DETERMINISTIC_DELAY US_TO_DLY_UNIT(PREAMBLE_DURATION + R_CPU_PROCESSING + TX_CFG_TIME)
+#define INITIATOR_DETERMINISTIC_DELAY US_TO_DLY_UNIT(PREAMBLE_DURATION + I_CPU_PROCESSING + TX_CFG_TIME)
+
+#define INITIATOR_RX_WAKEUP_DELAY US_TO_CUS(PREAMBLE_DURATION + R_CPU_PROCESSING + TX_CFG_TIME - STARUP_PLL - PREAMBLE_HUNT)
+#define RESPONDER_RX_WAKEUP_DELAY US_TO_CUS(PREAMBLE_DURATION + I_CPU_PROCESSING + TX_CFG_TIME - STARUP_PLL - PREAMBLE_HUNT)
 
 
+#define HRP_UWB_PHY_CHANNEL_5 5
+#define HRP_UWB_PHY_CHANNEL_9 9
+struct dw_isr_callbacks {
+	void (*cbTxDone)(const dwt_cb_data_t*);
+	void (*cbRxOk)(const dwt_cb_data_t*);
+	void (*cbRxTo)(const dwt_cb_data_t*);
+	void (*cbRxErr)(const dwt_cb_data_t*);
+	void (*cbSPIErr)(const dwt_cb_data_t*);
+	void (*cbSPIRdy)(const dwt_cb_data_t*);
+};
+// typedef enum {
+//         RANGING_NONE,
+//         RANGING_ENABLED = 0b10,
+//         RANGING_INITIATOR = RANGING_ENABLED | 0b00,
+//         RANGING_RESPONDER = RANGING_ENABLED | 0b01,
+//         TIME_SYNC_NONE = 0,
+//         TIME_SYNC_ENABLED = 0b10 << 2,
+//         TIME_SYNC_CONTROLER = TIME_SYNC_ENABLED | (0b00 <<2),
+//         TIME_SYNC_LISTNER = TIME_SYNC_ENABLED | (0b01 <<2),
+// } dw_configrole_e __packed;
+typedef enum {
+        RANGING_INITIATOR,
+        RANGING_RESPONDER,
+        TIME_SYNC_CONTROLER,
+        TIME_SYNC_LISTNER,
+} dw_configrole_e ;
 
 struct dw3xxx_config {
 	struct spi_dt_spec bus;
 	struct gpio_dt_spec irq_gpio;
-    struct gpio_dt_spec wkp_gpio; // better to implement kconfig to specify whether to use spi wakeup or wakeup pin
+        struct gpio_dt_spec wkp_gpio; // better to implement kconfig to specify whether to use spi wakeup or wakeup pin
 	struct gpio_dt_spec rst_gpio;
+        struct gpio_dt_spec sync_gpio;
 };
 
 struct dw3xxx_data {
 	struct gpio_callback irq_callback;
-    struct k_work isr_work;
+        struct k_work isr_work;
 	struct k_poll_signal irq_signal;
+
+        dwt_config_t phy_cfg;
+        dwt_txconfig_t tx_pwr_cfg;
+        struct dw_isr_callbacks cbs;
+        dw_configrole_e role;
+        uint32_t irq_mask_hi;
+        uint32_t irq_mask_lo;
+
 };
-
-
-
-
 typedef enum
 {
         CMD_TXRXOFF             = 0x81 | (0x00 << 1),
@@ -116,6 +175,13 @@ typedef enum{
 	// Not comprehensive. Only GEN_CFG_AES registers included so far 
 } dw_full_addr_e;
 
+static const uint8_t tx_pwr_lut_ch5[64] = {
+
+};
+// make a python script which creates the lookup table which is optimised for the lowest possible coarse grain for an 
+// given input
+
+
 
 
 int dw_spi_read(const struct device *dev, uint16_t hdr_len, const uint8_t *hdr_buf, uint32_t data_len, uint8_t *data);
@@ -124,3 +190,8 @@ void dw_wakeup(const struct device *dev);
 void dw_reset(const struct device *dev);
 void dw_enable_irq(const struct device* dev);
 void dw_disable_irq(const struct device* dev);
+int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel);
+
+// Placeholder unctions for demo
+void run_initiator_forever(void);
+void run_responder_forever(void);
