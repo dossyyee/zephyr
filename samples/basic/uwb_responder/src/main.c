@@ -49,7 +49,7 @@ int main(void)
 	dw3xxx_configure_device(uwb, RANGING_RESPONDER, HRP_UWB_PHY_CHANNEL_9);
 
 	dw_enable_irq(uwb);
-	run_responder_forever();
+	run_responder_forever(uwb);
 
 	LOG_ERR("Device not run");
 	return 0;

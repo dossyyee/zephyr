@@ -15,12 +15,12 @@
 #define RX_ANT_DLY 16385
 
 /* Time periods to tune */
-#define PREAMBLE_HUNT 50        // Desired time for preamble hunt, can be minimised to zero
-#define TX_CFG_TIME 300            // Time of dw3000 to process TX start + a buffer period
-#define R_CPU_PROCESSING 494    // Time from interrupt reception to start tx command
-#define I_CPU_PROCESSING 500    // Time from interrupt reception to start tx (command)
+#define PREAMBLE_HUNT 400        // Desired time for preamble hunt, can be minimised to zero
+#define TX_CFG_TIME 200           // Time of dw3000 to process TX start + a buffer period
+#define R_CPU_PROCESSING 398    // Time from interrupt reception to start tx command
+#define I_CPU_PROCESSING 442    // Time from interrupt reception to start tx command
 
-#define RX_TIMEOUT US_TO_UUS(300)          // Time after rx wakeup to call timout error
+#define RX_TIMEOUT US_TO_UUS(500)          // Time after rx wakeup to call timout error
 #define PREAMBLE_TIMEOUT 4      // How mand PACs to wait and flag a timout
 
 #define PREAMBLE_DURATION 65
@@ -37,7 +37,8 @@
 #define HRP_UWB_PHY_CHANNEL_9 9
 
 #define RX_EVENT_ERROR	-1
-#define RX_EVENT_OK	0
+#define RX_EVENT_ERROR_TO -2
+#define RX_EVENT_OK	1
 struct dw_isr_callbacks {
 	void (*cbTxDone)(const dwt_cb_data_t*);
 	void (*cbRxOk)(const dwt_cb_data_t*);
@@ -197,5 +198,5 @@ void dw_disable_irq(const struct device* dev);
 int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel);
 
 // Placeholder unctions for demo
-void run_initiator_forever(const struct device* dev) ;
-void run_responder_forever(void);
+void run_initiator_forever(const struct device* dev);
+void run_responder_forever(const struct device* dev);
