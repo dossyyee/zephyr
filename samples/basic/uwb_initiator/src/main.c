@@ -9,6 +9,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/counter.h>
 // #include <zephyr/timing/timing.h>
 
 #include <zephyr/drivers/ieee802154/deca_device_api.h>
@@ -34,11 +35,20 @@ LOG_MODULE_REGISTER(app);
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
 
+/* Requires timer0 to be enabled in device tree. Node label is specific to nrf5340 at this time.*/
+static const struct device *const timer0 = DEVICE_DT_GET(DT_NODELABEL(timer0));
+
 int main(void)
 {
 	printk("Entering Main\n");
 	// timing_init();
 	// timing_start();
+
+	/* Grab the clock driver */
+	if (!device_is_ready(timer0)) {
+		printk("%s: device not ready.\n", timer0->name);
+		return 0;
+	}
 
 	int ret;
 	if (!gpio_is_ready_dt(&led)) {
