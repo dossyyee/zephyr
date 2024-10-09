@@ -56,6 +56,16 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
         .PGcount = 0,								\
 }
 
+#define DW3000_RNG_IRQMASK_LO 	DWT_INT_TXFRS_BIT_MASK | 	\
+				DWT_INT_RXFCG_BIT_MASK | 	\
+				DWT_INT_RXFTO_BIT_MASK | 	\
+				DWT_INT_RXPTO_BIT_MASK | 	\
+				DWT_INT_RXPHE_BIT_MASK |	\
+				DWT_INT_RXFCE_BIT_MASK | 	\
+				DWT_INT_RXFSL_BIT_MASK | 	\
+				DWT_INT_RXSTO_BIT_MASK
+#define DW3000_RNG_IRQMASK_HI	0
+
 /* Type Definitions ----------------------------------------------------------*/
 
 /* Function Declarations -----------------------------------------------------*/
@@ -75,18 +85,6 @@ static uint8_t inter_rx_buf[MAX_DATA_BUF_LEN] = {0};
 
 static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 }; // implement set_sts_key func
 static dwt_sts_cp_iv_t sts_iv = { 0x1F9A3DE4, 0xD37EC3CA, 0xC44FA8FB, 0x362EEB34 };
-
-
-uint32_t rng_irq_mask_lo = DWT_INT_TXFRS_BIT_MASK | 
-			DWT_INT_RXFCG_BIT_MASK | 
-			DWT_INT_RXFTO_BIT_MASK | 
-			DWT_INT_RXPTO_BIT_MASK | 
-			DWT_INT_RXPHE_BIT_MASK |
-			DWT_INT_RXFCE_BIT_MASK | 
-			DWT_INT_RXFSL_BIT_MASK | 
-			DWT_INT_RXSTO_BIT_MASK;
-
-uint32_t rng_irq_mask_hi = 0;
 
 /* Private Variables ---------------------------------------------------------*/
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
@@ -456,10 +454,6 @@ void dw_reset(const struct device *dev)
 
 /*----------------------------------------------------------------------------*/
 /* Initiator in ranging mode callbacks */
-static uint64_t poll_tx_ts;
-static uint64_t resp_rx_ts;
-static uint64_t final_tx_ts;
-
 void run_initiator_forever(const struct device* dev) 
 {
 	struct dw3xxx_data *data  = dev->data;
@@ -471,7 +465,7 @@ void run_initiator_forever(const struct device* dev)
 	int signaled, result;
 
 	while (1) {
-		// Load counter and send a poll
+		// Reload counter and send a poll
 		dwt_configurestsiv(&sts_iv);
 		dwt_configurestsloadiv();
 		dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
@@ -484,13 +478,13 @@ void run_initiator_forever(const struct device* dev)
 			/* Add processing here for processing rx OK event. In this situation the ranging transaction 
 			completed successfully and timestamps can be packaged and shipped off to whoever wants them */
 
-			LOG_INF("%llu %llu %llu", poll_tx_ts, resp_rx_ts, final_tx_ts);
+			LOG_INF("%llu %llu %llu", data->timestamps.ts1, data->timestamps.ts2, data->timestamps.ts3);
 		}
+
 		// Sleep for ranging delay period
 		k_msleep(RNG_DELAY_MS);
 	}
 }
-
 
 static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
@@ -507,16 +501,16 @@ static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 	stsToast = dwt_readstsstatus(&stsStatus, 0);
 
 	if ((goodSts >= 0) && (stsToast == 0)) {
-		poll_tx_ts = get_tx_timestamp_u64();
-		resp_rx_ts = get_rx_timestamp_u64();
+		data->timestamps.ts1 = get_tx_timestamp_u64();
+		data->timestamps.ts2 = get_rx_timestamp_u64();
 
 		// final_tx_time = (resp_rx_ts + (RESP_RX_TO_FINAL_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
-		final_tx_time = (resp_rx_ts >> 8) + INITIATOR_DETERMINISTIC_DELAY;
+		final_tx_time = (data->timestamps.ts2 >> 8) + INITIATOR_DETERMINISTIC_DELAY;
 		dwt_setdelayedtrxtime(final_tx_time);
 
 		dwt_starttx(DWT_START_TX_DELAYED);
 
-		final_tx_ts = (((uint64_t)(final_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+		data->timestamps.ts3 = (((uint64_t)(final_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
 		// uint64_t log_time1 = timing_counter_get();
 		k_poll_signal_raise(&data->rx_event,RX_EVENT_OK);
@@ -549,10 +543,7 @@ static void initiator_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 
 /* Responder in ranging mode callbacks */
 
-static uint8_t rx_count = 0;
-static uint64_t poll_rx_ts;
-static uint64_t resp_tx_ts;
-static uint64_t final_rx_ts;
+
 
 void run_responder_forever(const struct device* dev) 
 {
@@ -563,7 +554,6 @@ void run_responder_forever(const struct device* dev)
                                  	 &data->rx_event),
     	};
 	int signaled, result;
-	uint8_t disable_to[4] = {0xFD, 0xFF, 0x00, 0x00};
 
 	while (1) {
 
@@ -590,11 +580,11 @@ void run_responder_forever(const struct device* dev)
 			// dw_full_addr_masked_write(dev, SYS_CFG, 4, disable_to); //disable rxto
 
 			if (signaled && (result == RX_EVENT_OK)) {
-				LOG_INF("%llu %llu %llu", poll_rx_ts, resp_tx_ts, final_rx_ts);
+				LOG_INF("%llu %llu %llu", data->timestamps.ts1, data->timestamps.ts2, data->timestamps.ts3);
 			} else if (signaled && (result < 0)){
 				/* placeholder */
 			} else {
-				rx_count = 0;
+				data->rx_count = 0;
 			}
 
 			k_poll_signal_reset(&data->rx_event);
@@ -604,9 +594,12 @@ void run_responder_forever(const struct device* dev)
 		} else if (signaled && (result == RX_EVENT_ERROR_TO)) {
 			LOG_ERR("Timeout error");
 		} else {
-			LOG_ERR("Cooked");
+			/* Either the signal has not been signalled or an unknown value has been returned by the signal. */
+			LOG_ERR("Unknown Error");
 		}
 
+		/* Responder is now synced with transmitter, delay for inter ranging delay minus a short period
+		 * to wake up and restart the reciever. */
 		k_msleep(RNG_DELAY_MS - 20);
 	}
 }
@@ -627,30 +620,30 @@ static void responder_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 
 	if ((goodSts >= 0) && (stsToast == 0)) {
 
-		if (!rx_count) {
-			poll_rx_ts = get_rx_timestamp_u64();
+		if (!data->rx_count) {
+			data->timestamps.ts1 = get_rx_timestamp_u64();
 
-			resp_tx_time = (poll_rx_ts >> 8) + RESPONDER_DETERMINISTIC_DELAY;
+			resp_tx_time = (data->timestamps.ts1 >> 8) + RESPONDER_DETERMINISTIC_DELAY;
 			dwt_setdelayedtrxtime(resp_tx_time);
 
 			dwt_starttx(DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED);
 
 			// dwt_setrxtimeout(RX_TIMEOUT);
-			resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
+			data->timestamps.ts2 = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
-			rx_count = 1;
+			data->rx_count = 1;
 			k_poll_signal_raise(&data->rx_event,RX_EVENT_OK);
 
 		} else { /* second/final rx event instance*/
 			// resp_tx_ts = get_tx_timestamp_u64();
-			final_rx_ts = get_rx_timestamp_u64();
-			rx_count = 0;
+			data->timestamps.ts3 = get_rx_timestamp_u64();
+			data->rx_count = 0;
 			k_poll_signal_raise(&data->rx_event,RX_EVENT_OK);
 		}
 
 	} else {
 		k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
-		rx_count = 0;
+		data->rx_count = 0;
 	}
 }
 
@@ -658,7 +651,7 @@ static void responder_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
 	struct dw3xxx_data *data  = uwb->data;
-	rx_count = 0;
+	data->rx_count = 0;
 	k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR_TO);
 }
 
@@ -666,7 +659,7 @@ static void responder_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
 	struct dw3xxx_data *data  = uwb->data;
-	rx_count = 0;
+	data->rx_count = 0;
 	k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
 }
 
@@ -787,8 +780,8 @@ int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint
 			data->role = role;
 			data->phy_cfg = DW3000_GET_RANGING_PHY_CONFIG(channel);
 			data->tx_pwr_cfg = DW3000_GET_RANGING_TXPWR_CONFIG(channel);
-			data->irq_mask_hi = rng_irq_mask_hi;
-			data->irq_mask_lo = rng_irq_mask_lo;
+			data->irq_mask_hi = DW3000_RNG_IRQMASK_HI;
+			data->irq_mask_lo = DW3000_RNG_IRQMASK_LO;
 			
 			data->cbs.cbRxOk = initiator_ranging_rx_ok_cb;
 			data->cbs.cbRxTo = initiator_ranging_rx_to_cb;
@@ -802,8 +795,8 @@ int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint
 			data->role = role;
 			data->phy_cfg = DW3000_GET_RANGING_PHY_CONFIG(channel);
 			data->tx_pwr_cfg = DW3000_GET_RANGING_TXPWR_CONFIG(channel);
-			data->irq_mask_hi = rng_irq_mask_hi;
-			data->irq_mask_lo = rng_irq_mask_lo;
+			data->irq_mask_hi = DW3000_RNG_IRQMASK_HI;
+			data->irq_mask_lo = DW3000_RNG_IRQMASK_LO;
 			
 			data->cbs.cbRxOk = responder_ranging_rx_ok_cb;
 			data->cbs.cbRxTo = responder_ranging_rx_to_cb;
