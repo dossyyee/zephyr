@@ -47,6 +47,14 @@ struct dw_isr_callbacks {
 	void (*cbSPIErr)(const dwt_cb_data_t*);
 	void (*cbSPIRdy)(const dwt_cb_data_t*);
 };
+
+/* Timestamp struct */
+struct dw_dstwr_ts_t {
+        uint64_t ts1;
+        uint64_t ts2;
+        uint64_t ts3;
+};
+
 // typedef enum {
 //         RANGING_NONE,
 //         RANGING_ENABLED = 0b10,
@@ -62,7 +70,7 @@ typedef enum {
         RANGING_RESPONDER,
         TIME_SYNC_CONTROLER,
         TIME_SYNC_LISTNER,
-} dw_configrole_e ;
+} dw_configrole_e;
 
 struct dw3xxx_config {
 	struct spi_dt_spec bus;
@@ -75,8 +83,9 @@ struct dw3xxx_config {
 struct dw3xxx_data {
 	struct gpio_callback irq_callback;
         struct k_work isr_work;
-	struct k_poll_signal irq_signal;
+	// struct k_poll_signal irq_signal;
         struct k_poll_signal rx_event;
+        struct k_poll_signal radio_wakeup;
 
         dwt_config_t phy_cfg;
         dwt_txconfig_t tx_pwr_cfg;
@@ -85,7 +94,10 @@ struct dw3xxx_data {
         uint32_t irq_mask_hi;
         uint32_t irq_mask_lo;
 
+        struct dw_dstwr_ts_t timestamps;
+        uint8_t rx_count;
 };
+
 typedef enum
 {
         CMD_TXRXOFF             = 0x81 | (0x00 << 1),
