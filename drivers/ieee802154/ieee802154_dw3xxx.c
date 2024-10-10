@@ -454,14 +454,60 @@ void dw_reset(const struct device *dev)
 
 /*----------------------------------------------------------------------------*/
 /* Initiator in ranging mode callbacks */
+int run_initiator(const struct device* dev)
+{
+	struct dw3xxx_data *data  = dev->data;
+	// struct k_poll_event data->rng_event[1] = {
+        // 	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
+        //                          	 K_POLL_MODE_NOTIFY_ONLY,
+        //                          	 &data->rx_sig),
+    	// };
+	int signaled, result;
+	int ret;
+
+	// Reload counter and send a poll
+	dwt_configurestsiv(&sts_iv);
+	dwt_configurestsloadiv();
+	dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
+
+	// Hold until rx event or timeout
+	k_poll(data->rng_event, 1, K_MSEC(1));
+	k_poll_signal_check(&data->rx_sig, &signaled, &result);
+
+	if (signaled && (result == RX_EVENT_OK)) {
+		/* Add processing here for processing rx OK event. In this situation the ranging transaction 
+		completed successfully and timestamps can be packaged and shipped off to whoever wants them */
+
+		// LOG_INF("%llu %llu %llu", data->timestamps.ts1, data->timestamps.ts2, data->timestamps.ts3);
+		ret = 0;
+
+	} else if (signaled && (result == RX_EVENT_ERROR)) {
+		LOG_ERR("RX_ERROR");
+		ret = -1;
+	} else if (signaled && (result == RX_EVENT_ERROR_TO)) {
+		LOG_ERR("RX_ERROR");
+		ret = -1;
+	} else if (!signaled) {
+		LOG_ERR("Signal timeout");
+		ret = -1;
+	} else {
+		ret = -1;
+	}
+	/* returning negative number for the moment. Should be more specific in future. */
+	k_poll_signal_reset(&data->rx_sig);
+	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+	return ret;
+}
+
+/* This function should be revised to use the run_initiator function */
 void run_initiator_forever(const struct device* dev) 
 {
 	struct dw3xxx_data *data  = dev->data;
-	struct k_poll_event events[1] = {
-        	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
-                                 	 K_POLL_MODE_NOTIFY_ONLY,
-                                 	 &data->rx_event),
-    	};
+	// struct k_poll_event data->rng_event[1] = {
+        // 	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
+        //                          	 K_POLL_MODE_NOTIFY_ONLY,
+        //                          	 &data->rx_sig),
+    	// };
 	int signaled, result;
 
 	while (1) {
@@ -471,8 +517,8 @@ void run_initiator_forever(const struct device* dev)
 		dwt_starttx(DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED);
 
 		// Hold until rx event or timeout
-		k_poll(events, 1, K_FOREVER);
-		k_poll_signal_check(&data->rx_event, &signaled, &result);
+		k_poll(data->rng_event, 1, K_FOREVER);
+		k_poll_signal_check(&data->rx_sig, &signaled, &result);
 
 		if (signaled && (result == RX_EVENT_OK)) {
 			/* Add processing here for processing rx OK event. In this situation the ranging transaction 
@@ -513,12 +559,12 @@ static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 		data->timestamps.ts3 = (((uint64_t)(final_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
 		// uint64_t log_time1 = timing_counter_get();
-		k_poll_signal_raise(&data->rx_event,RX_EVENT_OK);
+		k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
 
 		// uint64_t log_time2 = timing_counter_get();
 		// LOG_INF("Log Time: %llu µs", timing_cycles_to_ns(log_time2 - log_time1)/1000);
 	} else {
-		k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
+		k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 	}
 }
 
@@ -526,14 +572,14 @@ static void initiator_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
 	struct dw3xxx_data *data  = uwb->data;
-	k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
+	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 }
 
 static void initiator_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
 	struct dw3xxx_data *data  = uwb->data;
-	k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
+	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 }
 
 static void initiator_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
@@ -542,17 +588,83 @@ static void initiator_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 }
 
 /* Responder in ranging mode callbacks */
+int run_responder(const struct device* dev) 
+{
+	struct dw3xxx_data *data  = dev->data;
+
+	// struct k_poll_event data->rng_event[1] = {
+        // 	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
+        //                          	 K_POLL_MODE_NOTIFY_ONLY,
+        //                          	 &data->rx_sig),
+    	// };
+	int signaled, result;
+	int ret;
+
+	data->rx_count = 0;
+
+	dwt_configurestsiv(&sts_iv);
+	dwt_configurestsloadiv();
+	dwt_setrxtimeout(0);
+	dwt_rxenable(DWT_START_RX_IMMEDIATE);
+
+	// Wait for rx event
+	k_poll(data->rng_event, 1, K_FOREVER);
+	k_poll_signal_check(&data->rx_sig, &signaled, &result);
+	k_poll_signal_reset(&data->rx_sig);
+	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+
+	if (signaled && (result == RX_EVENT_OK)) {
+		/* This means that the responding tx event have been scheduled and the rx timeout has been
+			set. At this point, wait for the final rx event. */
+
+		k_poll(data->rng_event, 1, K_MSEC(2));
+		k_poll_signal_check(&data->rx_sig, &signaled, &result);
+		/* immediately disable the rx timeout so the interrupt will only trigger on an actual recieve 
+		event */
+		dwt_setrxtimeout(0);
+		// dw_full_addr_masked_write(dev, SYS_CFG, 4, disable_to); //disable rxto
+
+		if (signaled && (result == RX_EVENT_OK)) {
+			// LOG_INF("%llu %llu %llu", data->timestamps.ts1, data->timestamps.ts2, data->timestamps.ts3);
+			ret = 0;
+		} else if (signaled && (result == RX_EVENT_ERROR)){
+			LOG_ERR("2nd RX Error");
+			ret = -1;
+		} else if (signaled && (result == RX_EVENT_ERROR_TO)){
+			LOG_ERR("2nd Timeout Error");
+			ret = -1;
+		} else {
+			LOG_ERR("K-poll signal timeout");
+			ret = -1;
+		}
+
+	} else if (signaled && (result == RX_EVENT_ERROR)){
+		LOG_ERR("1st RX Error");
+			ret = -1;
+	} else if (signaled && (result == RX_EVENT_ERROR_TO)) {
+		LOG_ERR("1st Timeout error");
+			ret = -1;
+	} else {
+		/* Either the signal has not been signalled or an unknown value has been returned by the signal. */
+		LOG_ERR("Unknown Error");
+			ret = -1;
+	}
 
 
+	k_poll_signal_reset(&data->rx_sig);
+	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+	return ret;
+}
 
+/* TODO: This function should be revised to use the run_responder function */
 void run_responder_forever(const struct device* dev) 
 {
 	struct dw3xxx_data *data  = dev->data;
-	struct k_poll_event events[1] = {
-        	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
-                                 	 K_POLL_MODE_NOTIFY_ONLY,
-                                 	 &data->rx_event),
-    	};
+	// struct k_poll_event data->rng_event[1] = {
+        // 	K_POLL_EVENT_INITIALIZER(K_POLL_TYPE_SIGNAL,
+        //                          	 K_POLL_MODE_NOTIFY_ONLY,
+        //                          	 &data->rx_sig),
+    	// };
 	int signaled, result;
 
 	while (1) {
@@ -564,16 +676,16 @@ void run_responder_forever(const struct device* dev)
 		dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
 		// Wait for rx event
-		k_poll(events, 1, K_FOREVER);
-		k_poll_signal_check(&data->rx_event, &signaled, &result);
-		k_poll_signal_reset(&data->rx_event);
+		k_poll(data->rng_event, 1, K_FOREVER);
+		k_poll_signal_check(&data->rx_sig, &signaled, &result);
+		k_poll_signal_reset(&data->rx_sig);
 		
 		if (signaled && (result == RX_EVENT_OK)) {
 			/* This means that the responding tx event have been scheduled and the rx timeout has been
 			   set. At this point, wait for the final rx event. */
 
-			k_poll(events, 1, K_MSEC(2));
-			k_poll_signal_check(&data->rx_event, &signaled, &result);
+			k_poll(data->rng_event, 1, K_MSEC(2));
+			k_poll_signal_check(&data->rx_sig, &signaled, &result);
 			/* immediately disable the rx timeout so the interrupt will only trigger on an actual recieve 
 			event */
 			dwt_setrxtimeout(0);
@@ -587,7 +699,7 @@ void run_responder_forever(const struct device* dev)
 				data->rx_count = 0;
 			}
 
-			k_poll_signal_reset(&data->rx_event);
+			k_poll_signal_reset(&data->rx_sig);
 
 		} else if (signaled && (result == RX_EVENT_ERROR)){
 			LOG_ERR("RX Error");
@@ -632,17 +744,17 @@ static void responder_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 			data->timestamps.ts2 = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
 			data->rx_count = 1;
-			k_poll_signal_raise(&data->rx_event,RX_EVENT_OK);
+			k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
 
 		} else { /* second/final rx event instance*/
 			// resp_tx_ts = get_tx_timestamp_u64();
 			data->timestamps.ts3 = get_rx_timestamp_u64();
 			data->rx_count = 0;
-			k_poll_signal_raise(&data->rx_event,RX_EVENT_OK);
+			k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
 		}
 
 	} else {
-		k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
+		k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 		data->rx_count = 0;
 	}
 }
@@ -652,7 +764,7 @@ static void responder_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
     	(void)cb_data;
 	struct dw3xxx_data *data  = uwb->data;
 	data->rx_count = 0;
-	k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR_TO);
+	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR_TO);
 }
 
 static void responder_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
@@ -660,7 +772,7 @@ static void responder_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
     	(void)cb_data;
 	struct dw3xxx_data *data  = uwb->data;
 	data->rx_count = 0;
-	k_poll_signal_raise(&data->rx_event,RX_EVENT_ERROR);
+	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 }
 
 static void responder_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
@@ -868,8 +980,9 @@ int dw3xxx_init(const struct device *dev)
 
 	printk("DW3xxx init\n");
 
-	k_poll_signal_init(&data->irq_signal);
-	k_poll_signal_init(&data->rx_event);
+	// k_poll_signal_init(&data->irq_signal);
+	k_poll_signal_init(&data->rx_sig);
+	k_poll_event_init(&data->rng_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &data->rx_sig);
 
 	if (!spi_is_ready_dt(&cfg->bus)) {
 		LOG_ERR("SPI bus not ready %s", cfg->bus.bus->name);
