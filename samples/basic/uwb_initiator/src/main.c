@@ -44,7 +44,7 @@ int main(void)
 	if (!gpio_is_ready_dt(&led)) {
 		return 0;
 	}	
-	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
 	if (ret < 0) {
 		return 0;
 	}
@@ -52,8 +52,14 @@ int main(void)
 	dw3xxx_configure_device(uwb, RANGING_INITIATOR, HRP_UWB_PHY_CHANNEL_9);
 
 	dw_enable_irq(uwb);
-	run_initiator_forever(uwb);
 
+	while (1) {
+		ret = run_initiator(uwb);
+		if (ret == 0) {
+			gpio_pin_toggle_dt(&led);
+		}
+		k_msleep(200); /* arbitrary delay for testing. */
+	}
 
 	LOG_ERR("Device not run");
 	return 0;
