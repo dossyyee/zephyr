@@ -4,3 +4,7 @@
     // The timer base frequency is given by 16 MHz divided by the prescaler
     prescaler = < 0x0 >;
 };
+
+&rtc {
+    status = "okay";
+};

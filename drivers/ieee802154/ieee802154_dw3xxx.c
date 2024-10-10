@@ -868,7 +868,7 @@ int dw3xxx_init(const struct device *dev)
 
 	printk("DW3xxx init\n");
 
-	k_poll_signal_init(&data->irq_signal);
+	// k_poll_signal_init(&data->irq_signal);
 	k_poll_signal_init(&data->rx_event);
 
 	if (!spi_is_ready_dt(&cfg->bus)) {
@@ -908,6 +908,8 @@ int dw3xxx_init(const struct device *dev)
 		LOG_ERR("Failed to configure reset gpio!");
 		return rc;
 	}
+
+	/* Setup counter for */
 
 	return pm_device_driver_init(dev, dw3xxx_pm_control);
 }
