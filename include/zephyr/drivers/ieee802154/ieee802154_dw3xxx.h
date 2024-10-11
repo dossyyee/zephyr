@@ -40,6 +40,8 @@
 #define RX_EVENT_ERROR	        -1
 #define RX_EVENT_ERROR_TO       -2
 #define RX_EVENT_BAD_STS        -3
+#define ERROR_POLL_TIMEOUT      -4
+#define UNKNOWN_ERROR           -5
 
 struct dw_isr_callbacks {
 	void (*cbTxDone)(const dwt_cb_data_t*);
