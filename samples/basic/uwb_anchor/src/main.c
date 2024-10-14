@@ -53,34 +53,28 @@ static uint8_t mfg_data[] = { 0xff, 0xff, 0x00 };
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL|BT_LE_AD_NO_BREDR)),
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_BAS_VAL)), /* Change this to the custom ranging servive when implemented*/
+};
+static const struct bt_data sd[] = {
 	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)), /* Placeholder for anchor location/gps coords */
 };
 
 /* Periodic advertising roughly every 211 ms */
-static const struct bt_le_adv_param adv_param = BT_LE_ADV_PARAM_INIT(
-	(BT_LE_ADV_OPT_EXT_ADV | BT_LE_ADV_OPT_CONNECTABLE ), 
+static const struct bt_le_adv_param adv_param[] = {BT_LE_ADV_PARAM_INIT(
+	(BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_CONNECTABLE ), 
 	0x0150, 0x0154, NULL
-);
-struct bt_le_ext_adv *adv;
+)};
 
 
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
 static void start_adv(struct k_work *work)
 {
 	int err;
-	err = bt_le_per_adv_start(adv);
+	err = bt_le_adv_start(adv_param, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
 	if (err) {
-		LOG_ERR("Failed to start periodic advertising");
+		LOG_ERR("Failed to start advertising");
 	} else {
-		LOG_INF("Starting periodic advertising");
-	}
-
-	err = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
-	if (err) {
-		LOG_ERR("Failed to start extended advertising");
-	} else {
-		LOG_INF("Starting extended advertising");
+		LOG_INF("Starting advertising");
 	}
 }
 
@@ -93,13 +87,9 @@ static void connected(struct bt_conn *conn, uint8_t cnxn_err)
 		LOG_INF("Connected");
 		my_conn = bt_conn_ref(conn);
 
-		err = bt_le_per_adv_stop(adv);
+		err = bt_le_adv_stop();
 		if (err) {
 			LOG_ERR("Failed to stop periodic advertising");
-		}
-		err = bt_le_ext_adv_stop(adv);
-		if (err) {
-			LOG_ERR("Failed to stop extended advertising");
 		}
 	}
 }
@@ -132,20 +122,7 @@ int main(void)
 	}
 	bt_conn_cb_register(&connection_callbacks);
 	
-	/* Create extended advertising set */
-	err = bt_le_ext_adv_create(&adv_param, NULL, &adv);
-	if (err) {
-		LOG_ERR("Failed to create advertising set (err %d)", err);
-		return 0;
-	}
-	err = bt_le_ext_adv_set_data(adv, ad, ARRAY_SIZE(ad), NULL, 0);
-	if (err) {
-		LOG_ERR("Failed to set advertising data (err %d)", err);
-		return 0;
-	}
-
 	k_work_submit(&start_adv_worker);
-
 
 	dw3xxx_configure_device(uwb, RANGING_RESPONDER, HRP_UWB_PHY_CHANNEL_9);
 	/* Very important the the dw3000 irq is enabled after configuration */
