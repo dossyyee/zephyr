@@ -29,7 +29,8 @@ LOG_MODULE_REGISTER(app);
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
 
-/* The anchor will be in a peripheral role which only maintains one active connection to a tag.
+/* 
+ * The anchor will be in a peripheral role which only maintains one active connection to a tag.
  * The anchor uses extended advertising to 
  */
 
