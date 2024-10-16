@@ -9,8 +9,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/gatt.h>
 
 #include <zephyr/drivers/ieee802154/deca_device_api.h>
 #include <zephyr/drivers/ieee802154/deca_interface.h>
@@ -46,6 +50,8 @@ static struct bt_conn_cb connection_callbacks = {
 };
 static K_WORK_DEFINE(start_scan_worker, start_scan);
 
+atomic_t conn_status = ATOMIC_INIT(0);
+
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad)
 {
@@ -77,15 +83,13 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, st
 	/* Apply the heuristic to the anchor and slot it in the list*/
 	// TODO: create a heuristic
 
-	/* If the device found is highly rated, then attempt to create a connection to the device and */
-
 	// bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
 	// printk("Device found: %s (RSSI %d)\n", addr_str, rssi);
 
-	// /* connect only to devices in close proximity */
-	// if (rssi < -50) {
-	// 	return;
-	// }
+	/* If the device found is highly rated, then stop scanning attempt to create a connection to the 
+	 * device. Restart scanning if connection was unsuccessful. */
+
+	// TODO: test whether the connected callback is run prior to bt_conn_le_create returning
 
 	// if (bt_le_scan_stop()) {
 	// 	return;
@@ -99,6 +103,16 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, st
 	// }
 }
 
+/* Prototype function for anchor discovery. to be run infrequently or in moments of considerable movement.
+another indicator for when it should be run is when the number of skipped anchors with a low rssi is large */
+static void anchor_discovery(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad){
+	return;
+}
+
+/* could be useful to differentiate between active and passive scan activities. When priming the list
+of nearby devices, then an active scan should be implemented to collect scan response information such
+as gps coordinates and full name, etc. When in a ranging mode, then the scan only needs to be passive
+and attempt a connection if the anchor is highly rated. */ 
 static void start_scan(struct k_work *work)
 {
 	int err;
@@ -109,51 +123,53 @@ static void start_scan(struct k_work *work)
 		return;
 	}
 
-	LOG_INF("Scanning successfully started\n");
+	LOG_INF("Scanning successfully started");
 }
 
-// static void connected(struct bt_conn *conn, uint8_t err)
-// {
-// 	char addr[BT_ADDR_LE_STR_LEN];
+static void connected(struct bt_conn *conn, uint8_t err)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
 
-// 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-// 	if (err) {
-// 		printk("Failed to connect to %s %u %s\n", addr, err, bt_hci_err_to_str(err));
+	if (err) {
+		LOG_ERR("Failed to connect to %s %u %s", addr, err, bt_hci_err_to_str(err));
 
-// 		bt_conn_unref(curr_conn);
-// 		curr_conn = NULL;
+		bt_conn_unref(curr_conn);
+		curr_conn = NULL;
 
-// 		start_scan();
-// 		return;
-// 	}
+		start_scan();
+		return;
+	}
 
-// 	if (conn != default_conn) {
-// 		return;
-// 	}
+	if (conn != curr_conn) {
+		LOG_ERR("What funky stuff went doen here?");
+		return;
+	}
 
-// 	printk("Connected: %s\n", addr);
+	printk("Connected: %s\n", addr);
 
-// 	bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-// }
+	/* TODO: Synchronise the counter, start a ranging attempt */
 
-// static void disconnected(struct bt_conn *conn, uint8_t reason)
-// {
-// 	char addr[BT_ADDR_LE_STR_LEN];
+}
 
-// 	if (conn != default_conn) {
-// 		return;
-// 	}
+static void disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	char addr[BT_ADDR_LE_STR_LEN];
 
-// 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+	if (conn != default_conn) {
+		return;
+	}
 
-// 	printk("Disconnected: %s, reason 0x%02x %s\n", addr, reason, bt_hci_err_to_str(reason));
+	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-// 	bt_conn_unref(default_conn);
-// 	default_conn = NULL;
+	printk("Disconnected: %s, reason 0x%02x %s\n", addr, reason, bt_hci_err_to_str(reason));
 
-// 	start_scan();
-// }
+	bt_conn_unref(curr_conn);
+	curr_conn = NULL;
+
+	start_scan();
+}
 
 // BT_CONN_CB_DEFINE(conn_callbacks) = {
 // 	.connected = connected,
@@ -187,11 +203,12 @@ int main(void)
 	}
 
 	bt_conn_cb_register(&connection_callbacks);
-	k_work_submit(&start_adv_worker);
 
-	
 	dw3xxx_configure_device(uwb, RANGING_RESPONDER, HRP_UWB_PHY_CHANNEL_9);
 	dw_enable_irq(uwb);
+
+	k_work_submit(&start_scan_worker);
+
 	while (1) {
 		run_responder(uwb);
 	}
