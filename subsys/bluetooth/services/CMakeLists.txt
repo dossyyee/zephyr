@@ -7,6 +7,8 @@ zephyr_sources_ifdef(CONFIG_BT_CTS cts.c)
 
 zephyr_sources_ifdef(CONFIG_BT_HRS hrs.c)
 
+zephyr_sources_ifdef(CONFIG_BT_RS rs.c)
+
 zephyr_sources_ifdef(CONFIG_BT_TPS tps.c)
 
 if(CONFIG_BT_BAS)
