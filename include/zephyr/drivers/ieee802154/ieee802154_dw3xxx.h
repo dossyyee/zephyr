@@ -213,10 +213,12 @@ void dw_reset(const struct device *dev);
 void dw_enable_irq(const struct device* dev);
 void dw_disable_irq(const struct device* dev);
 int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel);
+void dw3xxx_update_sts_key(const struct device *dev, uint32_t *key);
+void dw3xxx_update_sts_iv(const struct device *dev, uint32_t *iv);
 
 // Placeholder unctions for demo
 void run_initiator_forever(const struct device* dev);
 void run_responder_forever(const struct device* dev);
 
-int run_responder(const struct device* dev);
+int run_responder(const struct device* dev, k_timeout_t timeout);
 int run_initiator(const struct device* dev);

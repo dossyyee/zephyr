@@ -19,6 +19,7 @@ config BT_RS_IV_UPPER96
 config BT_RS_IV_COUNT32
 	hex "Lower 32 bits Counter portion of the STS Input Vector"
 	default 0x362EEB34
+	range 0x0 0xFFFFFFFF
 	help
 	  The lower 32 bits of the encryption input vector
 	  used for sts transmission. Usually referred to as the counter

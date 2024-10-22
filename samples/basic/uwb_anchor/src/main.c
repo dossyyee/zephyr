@@ -19,6 +19,7 @@
 #include <zephyr/drivers/ieee802154/deca_version.h>
 
 #include <zephyr/drivers/ieee802154/ieee802154_dw3xxx.h>
+#include <zephyr/bluetooth/services/rs.h>
 
 
 LOG_MODULE_REGISTER(app);
@@ -38,6 +39,9 @@ static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
 static void connected(struct bt_conn *conn, uint8_t cnxn_err);
 static void disconnected(struct bt_conn *conn, uint8_t reason);
 static void start_adv(struct k_work *work);
+static void start_ranging(void);
+static void key_changed(void);
+static void iv_changed(void);
 
 /* ------------------------------------ Bluetooth Vairables --------------------------------------- */
 static K_WORK_DEFINE(start_adv_worker, start_adv);
@@ -65,6 +69,13 @@ static const struct bt_le_adv_param adv_param[] = {BT_LE_ADV_PARAM_INIT(
 	(BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_CONNECTABLE ), 
 	0x0150, 0x0154, NULL
 )};
+
+/* Ranging Service */
+static struct bt_rs_cb rs_callbacks = {
+	.start_ranging = start_ranging,
+	.key_changed = key_changed,
+	.iv_changed = iv_changed,
+};
 
 
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
@@ -102,6 +113,42 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	k_work_submit(&start_adv_worker);
 }
 
+static void start_ranging(void)
+{
+	LOG_INF("Start Ranging");
+	uint32_t key[STS_UINT_LEN];
+	uint32_t iv[STS_UINT_LEN];
+
+	bt_rs_get_key(key);
+	bt_rs_get_iv(iv);
+
+	/* Temporarily the key and iv should be updated here. It should already be consistant with the 
+	 * bluetooth service, but in case the callbacks have not been implemented or the key and iv have
+	* not been initiated yet */
+
+	dw3xxx_update_sts_key(key);
+	dw3xxx_update_sts_iv(iv);
+
+	run_responder(uwb, Z_TIMEOUT_TICKS(1000));
+}
+
+static void key_changed(void)
+{
+	/* Update the dw3000 device key*/
+	uint32_t key[STS_UINT_LEN];
+	bt_rs_get_key(key);
+	dw3xxx_update_sts_key(uwb, key);
+}
+
+static void iv_changed(void)
+{
+	/* Update the dw3000 device iv*/
+	uint32_t iv[STS_UINT_LEN];
+	bt_rs_get_iv(iv);
+	dw3xxx_update_sts_iv(uwb, iv);
+}
+
+
 int main(void)
 {
 	printk("Entering Main\n");
@@ -121,7 +168,9 @@ int main(void)
 		LOG_ERR("Bluetooth enable failed.");
 		return 0;
 	}
+	/* Register Callbacks */
 	bt_conn_cb_register(&connection_callbacks);
+	bt_rs_cb_init(&rs_callbacks);
 	
 	k_work_submit(&start_adv_worker);
 
@@ -129,12 +178,6 @@ int main(void)
 	/* Very important the the dw3000 irq is enabled after configuration */
 	dw_enable_irq(uwb);
 
-	
-
-	while (1) {
-		run_responder(uwb);
-	}
-
-	LOG_ERR("Device not run");
+	// LOG_ERR("Device not run");
 	return 0;
 }

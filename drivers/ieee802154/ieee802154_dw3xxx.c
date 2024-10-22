@@ -452,6 +452,21 @@ void dw_reset(const struct device *dev)
 	k_msleep(2);
 }
 
+
+/*----------------------------------------------------------------------------*/
+/* TODO: make the key and iv a art of the device data.*/
+/* TODO: Add a check to make sure that the device is in a correct state for setting the key and IV */
+void dw3xxx_update_sts_key(const struct device *dev, uint32_t *key)
+{
+	memcpy(&sts_key, key, sizeof(sts_key));
+	dwt_configurestskey(&sts_key);
+}
+
+void dw3xxx_update_sts_iv(const struct device *dev, uint32_t *iv)
+{
+	memcpy(&sts_iv, iv, sizeof(sts_iv));
+}
+
 /*----------------------------------------------------------------------------*/
 /* Initiator in ranging mode functions */
 int run_initiator(const struct device* dev)
@@ -553,7 +568,8 @@ static void initiator_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 }
 
 /* Responder in ranging mode functions */
-int run_responder(const struct device* dev) 
+/* TODO: add a timeout parameter to the function.*/
+int run_responder(const struct device* dev, k_timeout_t timeout) 
 {
 	struct dw3xxx_data *data  = dev->data;
 	int signaled, result;
@@ -566,11 +582,16 @@ int run_responder(const struct device* dev)
 	dwt_setrxtimeout(0);
 	dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
-	// Wait for rx event
-	k_poll(data->rng_event, 1, K_FOREVER);
+	// Wait for rx event for timeout (in ticks)
+	ret = k_poll(data->rng_event, 1, timeout);
 	k_poll_signal_check(&data->rx_sig, &signaled, &result);
 	k_poll_signal_reset(&data->rx_sig);
 	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+
+	if (ret) {
+		LOG_ERR("Ranging Recieve Timeout");
+		return ret;
+	}
 
 	if (signaled && (result == RX_EVENT_OK)) {
 		/* This means that the responding tx event have been scheduled and the rx timeout has been
@@ -608,7 +629,7 @@ int run_responder(const struct device* dev)
 void run_responder_forever(const struct device* dev) 
 {
 	while (1) {
-		run_responder(dev);
+		run_responder(dev, K_FOREVER);
 		/* Responder is now synced with transmitter, delay for inter ranging delay minus a short period
 		 * to wake up and restart the reciever. */
 		k_msleep(RNG_DELAY_MS - 2);
