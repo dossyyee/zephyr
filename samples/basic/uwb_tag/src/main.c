@@ -55,8 +55,8 @@ atomic_t conn_status = ATOMIC_INIT(0);
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad)
 {
-	char addr_str[BT_ADDR_LE_STR_LEN];
-	int err;
+	// char addr_str[BT_ADDR_LE_STR_LEN];
+	// int err;
 	/* 
 	 * Process should be to:
 	 * 1. Record the advertising devices nearby.
@@ -105,9 +105,9 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, st
 
 /* Prototype function for anchor discovery. to be run infrequently or in moments of considerable movement.
 another indicator for when it should be run is when the number of skipped anchors with a low rssi is large */
-static void anchor_discovery(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad){
-	return;
-}
+// static void anchor_discovery(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad){
+// 	return;
+// }
 
 /* could be useful to differentiate between active and passive scan activities. When priming the list
 of nearby devices, then an active scan should be implemented to collect scan response information such
@@ -138,7 +138,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		bt_conn_unref(curr_conn);
 		curr_conn = NULL;
 
-		start_scan();
+		k_work_submit(&start_scan_worker);
 		return;
 	}
 
@@ -147,7 +147,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 
-	printk("Connected: %s\n", addr);
+	LOG_INF("Connected: %s\n", addr);
 
 	/* TODO: Synchronise the counter, start a ranging attempt */
 
@@ -157,7 +157,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
 
-	if (conn != default_conn) {
+	if (conn != curr_conn) {
 		return;
 	}
 
@@ -168,7 +168,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	bt_conn_unref(curr_conn);
 	curr_conn = NULL;
 
-	start_scan();
+	k_work_submit(&start_scan_worker);
 }
 
 // BT_CONN_CB_DEFINE(conn_callbacks) = {

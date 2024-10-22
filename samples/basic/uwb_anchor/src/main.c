@@ -129,6 +129,8 @@ int main(void)
 	/* Very important the the dw3000 irq is enabled after configuration */
 	dw_enable_irq(uwb);
 
+	
+
 	while (1) {
 		run_responder(uwb);
 	}
