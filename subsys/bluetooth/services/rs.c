@@ -29,20 +29,29 @@
 LOG_MODULE_REGISTER(bt_rs);
  
 /* STS Key and IV (Key: 128 bits, IV: 96 bits + 32-bit counter) */
-static uint32_t sts_key[STS_UINT_LEN];
-static uint32_t sts_iv[STS_UINT_LEN]; /* First 12 bytes for IV, last 4 bytes for counter */
+// static uint32_t sts_key[STS_UINT_LEN];
+// static uint32_t sts_iv[STS_UINT_LEN]; /* First 12 bytes for IV, last 4 bytes for counter */
 
-/* TODO: revisit the implementation of the Key and IV. A union useful for dealing with the
-bytes from the bluetooth and Kconfig side and uint32_t from the application side. */
 union {
-	dwt_sts_cp_key_t a;
-	uint32_t b[4];
-} sts_key_things;
+	uint32_t u32[4];
+	uint8_t u8[16];
+} sts_key, sts_iv;
+
+/* TODO: revisit the size of the timestamp. Mathematically, only the lower digits are necessary
+ * for a correct distance calculation. Therefore this can be more space efficient. */
+union {
+	uint64_t u64[3];
+	uint8_t u8[24];
+} timestamp = {.u64 = {0,0,0}};
 
 
-
+/* callbacks */
 typedef void (*bt_rs_range_cb_t)(void);
 static const struct bt_rs_cb *rs_cb;
+
+/* Wizardry */
+static const struct bt_gatt_attr *timestamp_attr;
+static struct bt_gatt_indicate_params ind_params;
  
 /* UUID declarations */
 #define BT_UUID_RS_VAL			BT_UUID_128_ENCODE(0x49aa9800, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
@@ -57,15 +66,17 @@ static const struct bt_rs_cb *rs_cb;
 #define BT_UUID_RS_IV_CHAR_VAL		BT_UUID_128_ENCODE(0x49aa9803, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
 #define BT_UUID_RS_IV_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_IV_CHAR_VAL)
 
-#define BT_UUID_RS_RANGE_CHAR_VAL	BT_UUID_128_ENCODE(0x49aa9804, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS_RANGE_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_RANGE_CHAR_VAL)
+#define BT_UUID_RS_TS_CHAR_VAL		BT_UUID_128_ENCODE(0x49aa9804, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
+#define BT_UUID_RS_TS_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_TS_CHAR_VAL)
+
+#define BT_UUID_RS_RNGCMD_CHAR_VAL	BT_UUID_128_ENCODE(0x49aa9805, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
+#define BT_UUID_RS_RNGCMD_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_RNGCMD_CHAR_VAL)
  
 /* Read and write functions for the counter */
 static ssize_t read_counter(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
 			    uint16_t len, uint16_t offset)
 {
-	uint32_t counter_be = sys_cpu_to_be32(sts_iv[3]);
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, &counter_be, sizeof(counter_be));
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, &sts_iv.u32[3], sizeof(uint32_t));
 }
  
 static ssize_t write_counter(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
@@ -74,7 +85,11 @@ static ssize_t write_counter(struct bt_conn *conn, const struct bt_gatt_attr *at
 	if (offset != 0 || len != sizeof(uint32_t)) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
-	sts_iv[3] = sys_be32_to_cpu(*(uint32_t *)buf);
+
+	const uint32_t *value = buf;
+	sts_iv.u32[3] = *value;
+
+	/* Trigger the IV changed Callback if it is implemented */
 	if (rs_cb->iv_changed) {
 		rs_cb->iv_changed();
 	}
@@ -85,11 +100,7 @@ static ssize_t write_counter(struct bt_conn *conn, const struct bt_gatt_attr *at
 static ssize_t read_key(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
                         uint16_t len, uint16_t offset)
 {
-	uint8_t key_bytes[16];
-	for (int i = 0; i < 4; i++) {
-		sys_put_be32(sts_key[i], &key_bytes[i*4]);
-	}
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, key_bytes, sizeof(key_bytes));
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, sts_key.u8, sizeof(sts_key));
 }
  
 static ssize_t write_key(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
@@ -98,10 +109,10 @@ static ssize_t write_key(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
 	if (offset != 0 || len != sizeof(sts_key)) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
-	const uint8_t *key_bytes = buf;
-	for (int i = 0; i < 4; i++) {
-		sts_key[i] = sys_get_be32(&key_bytes[i*4]);
-	}
+
+	memcpy(sts_key.u8, (uint8_t *)buf, sizeof(sts_key));
+
+	/* Trigger the key changed Callback if it is implemented */
 	if (rs_cb->key_changed) {
 		rs_cb->key_changed();
 	}
@@ -112,11 +123,7 @@ static ssize_t write_key(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
 static ssize_t read_iv(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
                        uint16_t len, uint16_t offset)
 {
-	uint8_t iv_bytes[16];
-	for (int i = 0; i < 4; i++) {
-		sys_put_be32(sts_iv[i], &iv_bytes[i*4]);
-	}
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, iv_bytes, sizeof(iv_bytes));
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, sts_iv.u8, sizeof(sts_iv));
 }
  
 static ssize_t write_iv(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
@@ -125,18 +132,25 @@ static ssize_t write_iv(struct bt_conn *conn, const struct bt_gatt_attr *attr, c
 	if (offset != 0 || len != sizeof(sts_iv)) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
-	const uint8_t *iv_bytes = buf;
-	for (int i = 0; i < 4; i++) {
-		sts_iv[i] = sys_get_be32(&iv_bytes[i*4]);
-	}
+
+	memcpy(sts_iv.u8, (uint8_t *)buf, sizeof(sts_iv));
+
+	/* Trigger the IV changed Callback if it is implemented */
 	if (rs_cb->iv_changed) {
 		rs_cb->iv_changed();
 	}
 	return len;
 }
 
+/* Read function for the timestamp */
+static ssize_t read_ts(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
+                       uint16_t len, uint16_t offset)
+{
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, timestamp.u8, sizeof(timestamp));
+}
+
 /* Write function for start ranging */
-static ssize_t write_ranging(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
+static ssize_t write_range_cmd(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf,
                         uint16_t len, uint16_t offset, uint8_t flags)
 {
 	if (offset != 0 || len != 1) {
@@ -146,6 +160,7 @@ static ssize_t write_ranging(struct bt_conn *conn, const struct bt_gatt_attr *at
 	const uint8_t *value = buf;
 
 	if (*value  == 0x01) {
+		/* Start ranging if callback is implemented */
 		if (rs_cb->start_ranging) {
 			rs_cb->start_ranging();
 		}
@@ -153,6 +168,24 @@ static ssize_t write_ranging(struct bt_conn *conn, const struct bt_gatt_attr *at
 		LOG_WRN("Invalid  value for ranging characteristic");
 	}
 	return len;
+}
+
+static void indicate_cb(struct bt_conn *conn, struct bt_gatt_indicate_params *params, uint8_t err)
+{
+	if (err) {
+		LOG_ERR("Indication Failed: %d", err);
+	} else {
+		LOG_INF("Indication Successful");
+	}
+}
+
+static void timestamp_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	if (value & BT_GATT_CCC_INDICATE) {
+		LOG_INF("Timestamp indications enabled");
+	} else {
+		LOG_INF("Timestamp indications disabled");
+	}
 }
  
 /* Ranging Service Declaration */
@@ -173,42 +206,63 @@ BT_GATT_SERVICE_DEFINE(
 				BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
 				BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
 				read_iv, write_iv, NULL),
-	/* IV characteristic */
-	BT_GATT_CHARACTERISTIC(BT_UUID_RS_RANGE_CHAR,
+	/* Timestamp characteristic */
+	BT_GATT_CHARACTERISTIC(BT_UUID_RS_TS_CHAR,
+				BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE,
+				BT_GATT_PERM_READ,
+				read_ts, NULL, NULL),
+	/* Ranging Command characteristic */
+	BT_GATT_CHARACTERISTIC(BT_UUID_RS_RNGCMD_CHAR,
 				BT_GATT_CHRC_WRITE,
 				BT_GATT_PERM_WRITE,
-				NULL, write_ranging, NULL),
+				NULL, write_range_cmd, NULL),
+	BT_GATT_CCC(timestamp_ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
  
 /* Get and set functions for key, IV, and counter */
 void bt_rs_set_key(const uint32_t *key)
 {
-	memcpy(sts_key, key, 4 * sizeof(uint32_t));
+	memcpy(sts_key.u32, key, sizeof(sts_key));
 }
  
 void bt_rs_get_key(uint32_t *key)
 {
-	memcpy(key, sts_key, 4 * sizeof(uint32_t));
+	memcpy(key, sts_key.u32, sizeof(sts_key));
 }
  
 void bt_rs_set_iv_upper96(const uint32_t *iv)
 {
-	memcpy(sts_iv, iv, 3 * sizeof(uint32_t));
+	memcpy(sts_iv.u32, iv, 3* sizeof(uint32_t));
 }
  
 void bt_rs_get_iv(uint32_t *iv)
 {
-	memcpy(iv, sts_iv, 4 * sizeof(uint32_t));
+	memcpy(iv, sts_iv.u32, sizeof(sts_iv));
 }
  
 void bt_rs_set_iv_counter(uint32_t counter)
 {
-	sts_iv[3] = counter;
+	sts_iv.u32[3] = counter;
 }
  
 uint32_t bt_rs_get_iv_counter(void)
 {
-	return sts_iv[3];
+	return sts_iv.u32[3];
+}
+
+void bt_rs_set_timestamp(uint64_t *ts)
+{
+	memcpy(timestamp.u64, ts, sizeof(timestamp));
+}
+
+int bt_rs_indicate_timestamp(struct bt_conn *conn)
+{
+	int err = bt_gatt_indicate(conn, &ind_params);
+
+	if (err) {
+		LOG_ERR("Failed to send indication: %d", err);
+	}
+	return err;
 }
 
 int bt_rs_cb_init(const struct bt_rs_cb *cb)
@@ -233,15 +287,12 @@ static int bt_rs_init()
     	    	LOG_ERR("Invalid key length in CONFIG_BT_RS_KEY128");
     	    	return -EINVAL;
     	}
-	uint8_t key_bytes[16];
-    	if (hex2bin(key_str, key_len, key_bytes, sizeof(key_bytes)) != sizeof(key_bytes)) {
+    	if (hex2bin(key_str, key_len, sts_key.u8, sizeof(sts_key)) != sizeof(sts_key)) {
     	    	LOG_ERR("Failed to parse key from CONFIG_BT_RS_KEY128");
+		memset(sts_key.u8, 0x00, sizeof(sts_key));
     	    	return -EINVAL;
     	}
-	for (int i = 0; i < 4; i++) {
-		sts_key[i] = sys_get_be32(&key_bytes[i*4]);
-	}
-	
+
     	/* Parse the IV from CONFIG_BT_RS_IV_UPPER96 */
     	const char *iv_str = CONFIG_BT_RS_IV_UPPER96;
     	size_t iv_len = strlen(iv_str);
@@ -249,17 +300,31 @@ static int bt_rs_init()
 		LOG_ERR("Invalid IV length in CONFIG_BT_RS_IV_UPPER96");
 		return -EINVAL;
     	}
-	uint8_t iv_bytes[12];
-    	if (hex2bin(iv_str, iv_len, iv_bytes, sizeof(iv_bytes)) != sizeof(iv_bytes)) {
+    	if (hex2bin(iv_str, iv_len, sts_iv.u8, 12) != 12) {
 		LOG_ERR("Failed to parse IV from CONFIG_BT_RS_IV_UPPER96");
+		memset(sts_iv.u8, 0x00, 12);
 		return -EINVAL;
     	}
-	for (int i = 0; i < 3; i++) {
-		sts_iv[i] = sys_get_be32(&iv_bytes[i*4]);
-	}
 	
     	/* Get the counter from CONFIG_BT_RS_IV_COUNT32 */
-    	sts_iv[3] = CONFIG_BT_RS_IV_COUNT32;
+    	sts_iv.u32[3] = CONFIG_BT_RS_IV_COUNT32;
+
+	/* Setup the timestamp indication parameters */
+	/* WARNING: The position of the timestamp characteristic in the service declaration
+	 * macro impacts which index is used here. Be mindful of this when making changes. */
+	timestamp_attr = &rs_svc.attrs[8];
+
+	/* Set up the indication parameters for the timestamp */
+	if (!timestamp_attr) {
+		LOG_ERR("Timestamp attribute uninitialised");
+		return -EINVAL;
+	}
+	memset(&ind_params, 0, sizeof(ind_params));
+	ind_params.attr = timestamp_attr;
+	ind_params.func = indicate_cb;
+	ind_params.data = timestamp.u8;
+	ind_params.len = sizeof(timestamp);
+
     	return 0;
 }
  

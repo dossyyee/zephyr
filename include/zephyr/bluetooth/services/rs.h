@@ -16,4 +16,6 @@ void bt_rs_set_iv_upper96(const uint32_t *iv);
 void bt_rs_get_iv(uint32_t *iv);
 void bt_rs_set_iv_counter(uint32_t counter);
 uint32_t bt_rs_get_iv_counter(void);
+void bt_rs_set_timestamp(uint64_t *ts);
+int bt_rs_indicate_timestamp(struct bt_conn *conn);
 int bt_rs_cb_init(const struct bt_rs_cb *cb);

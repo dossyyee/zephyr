@@ -118,6 +118,9 @@ static void start_ranging(void)
 	LOG_INF("Start Ranging");
 	uint32_t key[STS_UINT_LEN];
 	uint32_t iv[STS_UINT_LEN];
+	uint64_t timestamp[3];
+
+	int err;
 
 	bt_rs_get_key(key);
 	bt_rs_get_iv(iv);
@@ -126,10 +129,20 @@ static void start_ranging(void)
 	 * bluetooth service, but in case the callbacks have not been implemented or the key and iv have
 	* not been initiated yet */
 
-	dw3xxx_update_sts_key(key);
-	dw3xxx_update_sts_iv(iv);
+	dw3xxx_update_sts_key(uwb, key);
+	dw3xxx_update_sts_iv(uwb, iv);
 
-	run_responder(uwb, Z_TIMEOUT_TICKS(1000));
+	err = run_responder(uwb, Z_TIMEOUT_TICKS(1000));
+	if (err) {
+		memset(timestamp, 0x00, sizeof(timestamp));
+		bt_rs_set_timestamp(timestamp);
+		bt_rs_indicate_timestamp(my_conn);
+	} else {
+		LOG_INF("Ranging Successful");
+		dw3xxx_get_timestamp(uwb, timestamp);
+		bt_rs_set_timestamp(timestamp);
+		bt_rs_indicate_timestamp(my_conn);
+	}
 }
 
 static void key_changed(void)

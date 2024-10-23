@@ -215,6 +215,7 @@ void dw_disable_irq(const struct device* dev);
 int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel);
 void dw3xxx_update_sts_key(const struct device *dev, uint32_t *key);
 void dw3xxx_update_sts_iv(const struct device *dev, uint32_t *iv);
+void dw3xxx_get_timestamp(const struct device *dev, uint64_t *ts);
 
 // Placeholder unctions for demo
 void run_initiator_forever(const struct device* dev);

@@ -467,6 +467,12 @@ void dw3xxx_update_sts_iv(const struct device *dev, uint32_t *iv)
 	memcpy(&sts_iv, iv, sizeof(sts_iv));
 }
 
+void dw3xxx_get_timestamp(const struct device *dev, uint64_t *ts)
+{
+	struct dw3xxx_data *data  = dev->data;
+	memcpy(ts, &data->timestamps, 3 * sizeof(uint64_t));
+}
+
 /*----------------------------------------------------------------------------*/
 /* Initiator in ranging mode functions */
 int run_initiator(const struct device* dev)
