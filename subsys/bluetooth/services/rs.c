@@ -52,25 +52,7 @@ static const struct bt_rs_cb *rs_cb;
 /* Wizardry */
 static const struct bt_gatt_attr *timestamp_attr;
 static struct bt_gatt_indicate_params ind_params;
- 
-/* UUID declarations */
-#define BT_UUID_RS_VAL			BT_UUID_128_ENCODE(0x49aa9800, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS			BT_UUID_DECLARE_128(BT_UUID_RS_VAL)
- 
-#define BT_UUID_RS_COUNTER_CHAR_VAL	BT_UUID_128_ENCODE(0x49aa9801, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS_COUNTER_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_COUNTER_CHAR_VAL)
- 
-#define BT_UUID_RS_KEY_CHAR_VAL		BT_UUID_128_ENCODE(0x49aa9802, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS_KEY_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_KEY_CHAR_VAL)
- 
-#define BT_UUID_RS_IV_CHAR_VAL		BT_UUID_128_ENCODE(0x49aa9803, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS_IV_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_IV_CHAR_VAL)
 
-#define BT_UUID_RS_TS_CHAR_VAL		BT_UUID_128_ENCODE(0x49aa9804, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS_TS_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_TS_CHAR_VAL)
-
-#define BT_UUID_RS_RNGCMD_CHAR_VAL	BT_UUID_128_ENCODE(0x49aa9805, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)
-#define BT_UUID_RS_RNGCMD_CHAR		BT_UUID_DECLARE_128(BT_UUID_RS_RNGCMD_CHAR_VAL)
  
 /* Read and write functions for the counter */
 static ssize_t read_counter(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
