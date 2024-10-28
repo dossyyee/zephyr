@@ -28,11 +28,13 @@
 LOG_MODULE_REGISTER(app);
 
 #define LED0_NODE 		DT_ALIAS(led0)
-#define LONG_SCAN_INTERVAL_MS	(15 * 60 * 1000)	/* 15 Minutes */
+#define LONG_SCAN_INTERVAL_MS	4000//(15 * 60 * 1000)	/* 15 Minutes */
 #define SHORT_SCAN_INTERVAL_MS	(1 * 60 * 1000)		/* 1 Minute */
 #define RANGING_INTERVAL_MS	(3 * 1000)		/* 3 Seconds */
 #define LONG_SCAN_DURATION_MS	(2000) 			/* 2 Second Active Scan */
 #define SHORT_SCAN_DURATION_MS	(500) 			/* 0.5 second Passive Scan */
+
+#define MAX_RANGING_ATTEMPTS	5
 
 #define ANCHOR_LIST_LEN		15	
 #define ANCHOR_SHORTLIST_LEN	6
@@ -52,8 +54,8 @@ static void long_scan_handler(struct k_work *work); /* Prime the list of devices
 static void stop_long_scan_handler(struct k_work *work); /* Reschedule the list priming */
 static void short_scan_handler(struct k_work *work); /* Short scan prior to ranging */
 static void stop_short_scan_handler(struct k_work *work); /* Reschedule the list priming */
-static void prune_anchors_handler(struct k_work *work);/* Get rid of unheard from anchors */
 static void do_ranging_handler(struct k_work *work);
+// static void prune_anchors_handler(struct k_work *work);/* Get rid of unheard from anchors */
 
 /* A long scan uses active scanning and is used to get a comprehensive list of all the nearby devices
 and to populate their information such as gps coordinates. It is run periodically at a large time 
@@ -69,9 +71,8 @@ static K_WORK_DELAYABLE_DEFINE(long_scan_work, long_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(stop_long_scan_work, stop_long_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(short_scan_work, short_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(stop_short_scan_work, stop_short_scan_handler);
-static K_WORK_DELAYABLE_DEFINE(prune_anchors_work, prune_anchors_handler);
 static K_WORK_DELAYABLE_DEFINE(do_ranging_work, do_ranging_handler);
-// static K_WORK_DEFINE(start_scan_worker, start_scan);
+// static K_WORK_DELAYABLE_DEFINE(prune_anchors_work, prune_anchors_handler);
 
 /* ------------------------------------ Bluetooth Vairables --------------------------------------- */
 
@@ -80,6 +81,14 @@ static struct bt_conn_cb connection_callbacks = {
 	.connected = connected,
 	.disconnected = disconnected,
 };
+struct bt_conn_le_create_param conn_create_param[] = {{
+	.options = BT_CONN_LE_OPT_NONE,
+	.interval = BT_GAP_SCAN_FAST_INTERVAL,
+	.window = BT_GAP_SCAN_FAST_WINDOW,
+	.interval_coded = 0, /* Same as 1M */
+	.window_coded = 0, /* Same as 1M */
+	.timeout = 400 /* Connection initiation timeout (N * 10 MS). The reliability of achieveing a connection will depend on advertising interval and this */
+}};
 /* ----------------------------------- Application Vairables -------------------------------------- */
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
@@ -105,29 +114,48 @@ struct anchor {
 	int reliability; // A record of past ranging attempts
 	int last_heard; // Change this to use Date time. Used to drop devices from the list when no longer around.
 	struct gps_coord coord;
+	bool exists; // temporary measure for knowing if a anchor in the list exists or not
 };
 struct quick_anchor {
 	bt_addr_le_t addr;
 	int score;
 };
 
-static struct anchor anchor_list[ANCHOR_LIST_LEN]; /* A record of the nearby anchors. */
+static struct anchor anchor_list[ANCHOR_LIST_LEN] = {0}; /* A record of the nearby anchors. */
 static struct quick_anchor shortlist[ANCHOR_SHORTLIST_LEN]; /* Passive scan updated, Ranked list of achors to range with */
 enum op_mode app_state = IDLE;
+
 static struct bt_uuid_128 rs_uuid = BT_UUID_INIT_128(BT_UUID_RS_VAL);
+static struct bt_uuid_128 count_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_COUNTER_CHAR_VAL);
 
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
 
-/* Function to check the advertisement packet contains a UUID matching the Ranging service uuid.*/
+/** @brief Callback used with bt_data_parse to check the advertisement packet contains a UUID matching the 
+ * Ranging service uuid.
+ *
+ *  @param data Data to check
+ *  @param user_data Boolean value used to store the outcome of the check
+ *
+ *  @return true if next data in advertisement should be checked, otherwise false.
+ */
 static bool is_anchor(struct bt_data *data, void *user_data)
 {
 	bool *found = user_data;
-
+	// char rs_uuid_str[BT_UUID_STR_LEN] = {0};
+	// char uuid_str[BT_UUID_STR_LEN] = {0};
+	// struct bt_uuid_128 t = {0};
+	// struct bt_uuid *u = (struct bt_uuid *)(&t);
 	/* check if the data is a UUID. Expecting only one UUID to be advertised */
 	if (data->type == BT_DATA_UUID128_ALL) {
 		/* Check that the uuid matches the Ranging Service uuid */
+		// bt_uuid_create(u, data->data, 16);
+		// bt_uuid_to_str(&uuid, uuid_str, BT_UUID_STR_LEN);
+		// bt_uuid_to_str(BT_UUID_RS, rs_uuid_str, BT_UUID_STR_LEN);
+		// printk("UUID128 adv. UUID: %s\tRS UUID: %s\n", uuid_str, rs_uuid_str);
+		// if (!bt_uuid_cmp(&rs_uuid.uuid, u)) {
 		if (!memcmp(rs_uuid.val, data->data, 16)) {	/* TODO: Check that this will work as expected! */
 			*found = true;
+			/* return false to indicate that no more advertisement data should be parsed */
 			return false;
 		}
 	} else if (data->type == BT_DATA_UUID128_SOME) {
@@ -135,6 +163,82 @@ static bool is_anchor(struct bt_data *data, void *user_data)
 		LOG_INF("Unexpected. More than one 128 bit uuid observed.");
 	}
 	return true;
+}
+
+/** @brief Callback used with bt_data_parse to parse the data from the advertisement of a bluetooth device 
+ * which has already been established that it is an anchor.
+ *
+ *  @param data Data to parse
+ *  @param user_data Pointer to an anchor struct.
+ *
+ *  @return true
+ */
+static bool parse_anchor_data(struct bt_data *data, void *user_data)
+{
+	struct anchor *a = user_data;
+
+	switch (data->type) {
+		/* Add more cases as they become relevant. */
+	case BT_DATA_MANUFACTURER_DATA:
+		ARG_UNUSED(a);
+		/* TODO: this should hold a struct that contains the gps coordinates. 
+		 Yet to be implemented on anchor appilation side. */
+	}
+	return true;
+}
+
+/** @brief Check if an anchor is stored in a list of anchors by using addr.
+ *
+ *  @param addr Anchor device address to check
+ *  @param a_list List of stored known anchors
+ *  @param len Length of anchor list
+ *
+ *  @return list index of anchor if @a addr is in @a a_list, else -1
+ */
+static int anchor_is_known(const bt_addr_le_t *addr, struct anchor *a_list, int len)
+{
+	for (int i = 0; i < len; i++) {
+		if (bt_addr_le_eq(addr, &a_list[i].addr)) {
+			return i;
+		}
+	}
+	return 0;
+}
+
+/** @brief Function to find where a new anchor should be placed within the list of known anchors. This
+ * will either be an empty slot or will be to replace an anchor with worse rssi or a very long unheard 
+ * from time. If the new device has bad rssi, then there is a chance that it is rejected.
+ *
+ *  @param rssi RSSI of the new device
+ *  @param a_list List of stored known anchors
+ *  @param len Length of anchor list
+ *
+ *  @return a value from 0 to @a len - 1 if a slot is allocated, else -1
+ */
+static int get_new_anchor_index(int8_t rssi, struct anchor *a_list, int len)
+{
+	/* TODO: Add consideration for the last_heard value so that anchors that have not been heard from
+	get dropped. */
+	int candidate_index = -1;
+	int8_t worst_rssi = 127;
+
+	for (int i = 0; i < len; i++) {
+		/* check if the slot in the list is empty */
+		if (!a_list[i].exists) {
+			return i;
+		}
+
+		if (a_list[i].rssi < worst_rssi) {
+			candidate_index = i;
+			worst_rssi = a_list[i].rssi;
+		}
+	}
+
+	if (worst_rssi > rssi) {
+		/* Reject the new device because it has a worse rssi */
+		return -1;
+	}
+	return candidate_index;
 }
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, struct net_buf_simple *ad)
@@ -168,6 +272,25 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, st
 		/* Update the anchor if it is already in the list */
 		break;
 	case LONG_SCAN:
+
+		int ind = anchor_is_known(addr, anchor_list, ANCHOR_LIST_LEN);
+		if (ind > 0) {
+			/* Update the parameters: rssi, last heard */
+			anchor_list[ind].rssi = rssi;
+			/* Apply the heuristic to the device, add to the list and sort. */
+		} else {
+			int ind = get_new_anchor_index(rssi, anchor_list, ANCHOR_LIST_LEN);
+			
+			if (ind < 0) {
+				/* Reject the anchor */
+				break;
+			}
+			
+			memcpy(anchor_list[ind].addr.a.val, addr->a.val, BT_ADDR_SIZE);
+			anchor_list[ind].rssi = rssi;
+			anchor_list[ind].exists = true;
+			bt_data_parse(ad, parse_anchor_data, &anchor_list[ind]);
+		}
 		break;
 	case RANGING:
 		/* Placeholder. Scanning should be disabled during connection attempts but there
@@ -267,8 +390,12 @@ static void stop_short_scan_handler(struct k_work *work)
 	}
 }
 
+static struct bt_gatt_discover_params discover_params;
+static struct bt_gatt_subscribe_params subscribe_params;
+
 static void do_ranging_handler(struct k_work *work)
 {
+	int err;
 	/* Reschedule the next ranging event regardless of current system state */
 	k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
 
@@ -282,9 +409,63 @@ static void do_ranging_handler(struct k_work *work)
 	/* Attempt to connect to each of the devices in the shortlist in series until the
 	 * number of successfull range attempts reaches 3 or 4, or untill the end of the 
 	 * list is reached. */
-	LOG_INF("Pretend ranging attempt");
 
+	/* Currently using the main list of anchors, not the ranked shortlist of anchors */
+
+	for (int i = 0; i < ANCHOR_LIST_LEN; i++) {
+		/* check if the anchor exists field is true. */
+		if (!anchor_list[i].exists) {
+			continue;
+		}
+
+		/* 1. Start a connection */
+		err = bt_conn_le_create(&anchor_list[i].addr, conn_create_param, BT_LE_CONN_PARAM_DEFAULT, &curr_conn);
+		if (err) {
+			char addr_str[BT_ADDR_LE_STR_LEN];
+			bt_addr_le_to_str(&anchor_list[i].addr, addr_str, sizeof(addr_str));
+			printk("Create conn to %s failed (%d)\n", addr_str, err);
+			break;
+		}
+
+		for (int j = 0; j < MAX_RANGING_ATTEMPTS; j++) {
+			/* Write to the counter characteristic */
+			
+			/* Write to the uwb counter */
+			/* Send a ranging command */
+			/* Read from the timestamp characteristic */
+		}
+
+		bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	}
+
+	LOG_INF("Ranging attempted");
 	app_state = IDLE;
+}
+static uint8_t discover_func(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr,
+			     struct bt_gatt_discover_params *params)
+{
+	int err;
+
+	if (!attr) {
+		printk("Discover complete\n");
+		(void)memset(params, 0, sizeof(*params));
+		return BT_GATT_ITER_STOP;
+	}
+
+	printk("[ATTRIBUTE] handle %u\n", attr->handle);
+
+	if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_COUNTER_CHAR)) {
+		LOG_INF("Counter characteristic Found");
+		return BT_GATT_ITER_STOP;
+	} else {
+		discover_params.start_handle = attr->handle + 1;
+		err = bt_gatt_discover(conn, &discover_params);
+		if (err) {
+			printk("Discover failed (err %d)\n", err);
+		}
+	}
+	return BT_GATT_ITER_STOP;
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
@@ -308,7 +489,19 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	LOG_INF("Connected: %s\n", addr);
 
-	/* TODO: Synchronise the counter, start ranging attempts (max of 5 attempts) */
+	if (conn == curr_conn) {
+		discover_params.uuid = &count_char_uuid.uuid;
+		discover_params.func = discover_func;
+		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+		discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+		err = bt_gatt_discover(curr_conn, &discover_params);
+		if (err) {
+			printk("Discover failed(err %d)\n", err);
+			return;
+		}
+	}
 
 }
 
@@ -351,7 +544,7 @@ int main(void)
 	err = bt_enable(NULL);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);
-		return 0U;
+		return 0;
 	}
 	/* Register connection callbacks */
 	bt_conn_cb_register(&connection_callbacks);
