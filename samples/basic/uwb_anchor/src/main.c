@@ -64,10 +64,11 @@ static const struct bt_data sd[] = {
 	BT_DATA(BT_DATA_MANUFACTURER_DATA, mfg_data, sizeof(mfg_data)), /* Placeholder for anchor location/gps coords */
 };
 
-/* Periodic advertising roughly every 211 ms */
+/* Periodic advertising roughly every 62 ms */
 static const struct bt_le_adv_param adv_param[] = {BT_LE_ADV_PARAM_INIT(
-	(BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_CONNECTABLE ), 
-	0x0150, 0x0154, NULL
+	(BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_SCANNABLE), 
+	// (BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_CONNECTABLE | BT_LE_ADV_OPT_SCANNABLE), 
+	0x0064, 0x0068, NULL
 )};
 
 /* Ranging Service */

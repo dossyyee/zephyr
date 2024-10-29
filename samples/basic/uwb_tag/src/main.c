@@ -28,7 +28,7 @@
 LOG_MODULE_REGISTER(app);
 
 #define LED0_NODE 		DT_ALIAS(led0)
-#define LONG_SCAN_INTERVAL_MS	4000//(15 * 60 * 1000)	/* 15 Minutes */
+#define LONG_SCAN_INTERVAL_MS	(15 * 60 * 1000)	/* 15 Minutes */
 #define SHORT_SCAN_INTERVAL_MS	(1 * 60 * 1000)		/* 1 Minute */
 #define RANGING_INTERVAL_MS	(3 * 1000)		/* 3 Seconds */
 #define LONG_SCAN_DURATION_MS	(2000) 			/* 2 Second Active Scan */
@@ -55,6 +55,7 @@ static void stop_long_scan_handler(struct k_work *work); /* Reschedule the list 
 static void short_scan_handler(struct k_work *work); /* Short scan prior to ranging */
 static void stop_short_scan_handler(struct k_work *work); /* Reschedule the list priming */
 static void do_ranging_handler(struct k_work *work);
+static void do_ranging_thread(void *arg1, void *arg2, void *arg3);
 // static void prune_anchors_handler(struct k_work *work);/* Get rid of unheard from anchors */
 
 /* A long scan uses active scanning and is used to get a comprehensive list of all the nearby devices
@@ -74,6 +75,14 @@ static K_WORK_DELAYABLE_DEFINE(stop_short_scan_work, stop_short_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(do_ranging_work, do_ranging_handler);
 // static K_WORK_DELAYABLE_DEFINE(prune_anchors_work, prune_anchors_handler);
 
+#define RANGING_STACK_SIZE	1024
+#define RANGING_PRIORITY	10
+
+K_THREAD_DEFINE(ranging_thread_id, RANGING_STACK_SIZE,
+		do_ranging_thread, NULL, NULL, NULL,
+		RANGING_PRIORITY, 0, 0);
+
+
 /* ------------------------------------ Bluetooth Vairables --------------------------------------- */
 
 static struct bt_conn *curr_conn = NULL;
@@ -87,7 +96,7 @@ struct bt_conn_le_create_param conn_create_param[] = {{
 	.window = BT_GAP_SCAN_FAST_WINDOW,
 	.interval_coded = 0, /* Same as 1M */
 	.window_coded = 0, /* Same as 1M */
-	.timeout = 400 /* Connection initiation timeout (N * 10 MS). The reliability of achieveing a connection will depend on advertising interval and this */
+	.timeout = 70 /* Connection initiation timeout (N * 10 MS). The reliability of achieveing a connection will depend on advertising interval and this */
 }};
 /* ----------------------------------- Application Vairables -------------------------------------- */
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
@@ -124,11 +133,24 @@ struct quick_anchor {
 static struct anchor anchor_list[ANCHOR_LIST_LEN] = {0}; /* A record of the nearby anchors. */
 static struct quick_anchor shortlist[ANCHOR_SHORTLIST_LEN]; /* Passive scan updated, Ranked list of achors to range with */
 enum op_mode app_state = IDLE;
+static atomic_t CONNECTED = ATOMIC_INIT(0);
+struct k_poll_signal conn_sig;
+struct k_poll_event conn_event[1];
 
 static struct bt_uuid_128 rs_uuid = BT_UUID_INIT_128(BT_UUID_RS_VAL);
 static struct bt_uuid_128 count_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_COUNTER_CHAR_VAL);
+static struct bt_uuid_128 ts_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_TS_CHAR_VAL);
+static struct bt_uuid_128 rc_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_RNGCMD_CHAR_VAL);
 
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
+/** @brief Check the status of the atomic bet CONNECTED which mirrors the bluetooth connection status
+ *
+ *  @return true if CONNECTED == 1, otherwise false.
+ */
+static inline bool is_device_connected(void)
+{
+	return atomic_get(&CONNECTED) == 1;
+}
 
 /** @brief Callback used with bt_data_parse to check the advertisement packet contains a UUID matching the 
  * Ranging service uuid.
@@ -202,7 +224,7 @@ static int anchor_is_known(const bt_addr_le_t *addr, struct anchor *a_list, int 
 			return i;
 		}
 	}
-	return 0;
+	return -1;
 }
 
 /** @brief Function to find where a new anchor should be placed within the list of known anchors. This
@@ -274,19 +296,19 @@ static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type, st
 	case LONG_SCAN:
 
 		int ind = anchor_is_known(addr, anchor_list, ANCHOR_LIST_LEN);
-		if (ind > 0) {
+		if (ind >= 0) {
 			/* Update the parameters: rssi, last heard */
 			anchor_list[ind].rssi = rssi;
 			/* Apply the heuristic to the device, add to the list and sort. */
 		} else {
 			int ind = get_new_anchor_index(rssi, anchor_list, ANCHOR_LIST_LEN);
-			
+
 			if (ind < 0) {
 				/* Reject the anchor */
 				break;
 			}
 			
-			memcpy(anchor_list[ind].addr.a.val, addr->a.val, BT_ADDR_SIZE);
+			bt_addr_le_copy(&anchor_list[ind].addr, addr);
 			anchor_list[ind].rssi = rssi;
 			anchor_list[ind].exists = true;
 			bt_data_parse(ad, parse_anchor_data, &anchor_list[ind]);
@@ -390,9 +412,6 @@ static void stop_short_scan_handler(struct k_work *work)
 	}
 }
 
-static struct bt_gatt_discover_params discover_params;
-static struct bt_gatt_subscribe_params subscribe_params;
-
 static void do_ranging_handler(struct k_work *work)
 {
 	int err;
@@ -417,15 +436,22 @@ static void do_ranging_handler(struct k_work *work)
 		if (!anchor_list[i].exists) {
 			continue;
 		}
-
+		
 		/* 1. Start a connection */
 		err = bt_conn_le_create(&anchor_list[i].addr, conn_create_param, BT_LE_CONN_PARAM_DEFAULT, &curr_conn);
 		if (err) {
 			char addr_str[BT_ADDR_LE_STR_LEN];
 			bt_addr_le_to_str(&anchor_list[i].addr, addr_str, sizeof(addr_str));
-			printk("Create conn to %s failed (%d)\n", addr_str, err);
+			printk("Create conn to %s failed (%d). %s\n", addr_str, err, bt_hci_err_to_str(err));
 			break;
 		}
+		/* Wait until the device is connected */
+		// printk("Connection Status: %s\n", is_device_connected() == true ? "connected" : "disconnected");
+		err = k_poll(conn_event, 1, K_FOREVER);
+		// k_poll_signal_check(&conn_sig, &signaled, &result);
+		k_poll_signal_reset(&conn_sig);
+		conn_event[0].state = K_POLL_STATE_NOT_READY;
+		// printk("Connection Status: %s\n", is_device_connected() == true ? "connected" : "disconnected");
 
 		for (int j = 0; j < MAX_RANGING_ATTEMPTS; j++) {
 			/* Write to the counter characteristic */
@@ -434,13 +460,89 @@ static void do_ranging_handler(struct k_work *work)
 			/* Send a ranging command */
 			/* Read from the timestamp characteristic */
 		}
+		k_msleep(1000);
 
 		bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+
+		// printk("Attempt disconnect\n");
+		// err = k_poll(conn_event, 1, K_FOREVER);
+		// k_poll_signal_check(&conn_sig, &signaled, &result);
+		// k_poll_signal_reset(&conn_sig);
+		// conn_event[0].state = K_POLL_STATE_NOT_READY;
+
+		/* Wait until the device has disconnected. */
+		// while(is_device_connected()) {};
 	}
 
 	LOG_INF("Ranging attempted");
 	app_state = IDLE;
 }
+
+static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
+{
+	int err;
+	/* Reschedule the next ranging event regardless of current system state */
+	// k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
+	while (1) {
+		if (app_state == IDLE) {
+			/* No scanning is taking place.*/
+
+			app_state = RANGING;
+
+			/* Attempt to connect to each of the devices in the shortlist in series until the
+			* number of successfull range attempts reaches 3 or 4, or untill the end of the 
+			* list is reached. */
+
+			/* Currently using the main list of anchors, not the ranked shortlist of anchors */
+
+			for (int i = 0; i < ANCHOR_LIST_LEN; i++) {
+				/* check if the anchor exists field is true. */
+				if (!anchor_list[i].exists) {
+					continue;
+				}
+				
+				/* 1. Start a connection */
+				err = bt_conn_le_create(&anchor_list[i].addr, conn_create_param, BT_LE_CONN_PARAM_DEFAULT, &curr_conn);
+				if (err) {
+					char addr_str[BT_ADDR_LE_STR_LEN];
+					bt_addr_le_to_str(&anchor_list[i].addr, addr_str, sizeof(addr_str));
+					printk("Create conn to %s failed (%d). %s\n", addr_str, err, bt_hci_err_to_str(err));
+					break;
+				}
+				/* Wait until the device is connected */
+				err = k_poll(conn_event, 1, K_FOREVER);
+				// k_poll_signal_check(&conn_sig, &signaled, &result);
+				k_poll_signal_reset(&conn_sig);
+				conn_event[0].state = K_POLL_STATE_NOT_READY;
+
+				for (int j = 0; j < MAX_RANGING_ATTEMPTS; j++) {
+					/* Write to the counter characteristic. Attribute handle = 17 */
+					
+					/* Write to the uwb counter (uwb device)*/
+					/* Send a ranging command. Attribute Handle = 23 */
+					/* Read from the timestamp characteristic. Attribute handle = 25 */
+				}
+				k_msleep(1000);
+
+				bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+
+				/* Wait until the device has disconnected. */
+				err = k_poll(conn_event, 1, K_FOREVER);
+				// k_poll_signal_check(&conn_sig, &signaled, &result);
+				k_poll_signal_reset(&conn_sig);
+				conn_event[0].state = K_POLL_STATE_NOT_READY;
+			}
+
+			LOG_INF("Ranging attempted");
+			app_state = IDLE;
+		}
+		k_msleep(RANGING_INTERVAL_MS);
+	}
+}
+
+static struct bt_gatt_discover_params discover_params;
+static struct bt_gatt_subscribe_params subscribe_params;
+
 static uint8_t discover_func(struct bt_conn *conn,
 			     const struct bt_gatt_attr *attr,
 			     struct bt_gatt_discover_params *params)
@@ -453,11 +555,28 @@ static uint8_t discover_func(struct bt_conn *conn,
 		return BT_GATT_ITER_STOP;
 	}
 
-	printk("[ATTRIBUTE] handle %u\n", attr->handle);
+	// printk("[ATTRIBUTE] handle %u\n", attr->handle);
 
 	if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_COUNTER_CHAR)) {
-		LOG_INF("Counter characteristic Found");
+		LOG_INF("Counter characteristic ATTR handle: %u", attr->handle);
+		discover_params.uuid = &ts_char_uuid.uuid;
+		discover_params.start_handle = attr->handle + 1;
+		err = bt_gatt_discover(conn, &discover_params);
+		if (err) {
+			printk("Discover failed (err %d)\n", err);
+		}
+	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_TS_CHAR)) {
+		LOG_INF("Timestamp characteristic ATTR handle: %u", attr->handle);
+		discover_params.uuid = &rc_char_uuid.uuid;
+		discover_params.start_handle = attr->handle + 1;
+		err = bt_gatt_discover(conn, &discover_params);
+		if (err) {
+			printk("Discover failed (err %d)\n", err);
+		}
+	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_RNGCMD_CHAR)) {
+		LOG_INF("Range Command characteristic ATTR handle: %u", attr->handle);
 		return BT_GATT_ITER_STOP;
+		
 	} else {
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
@@ -486,8 +605,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		LOG_ERR("What funky stuff went down here?");
 		return;
 	}
-
-	LOG_INF("Connected: %s\n", addr);
+	atomic_set(&CONNECTED, 1);
+	LOG_INF("Connected: %s", addr);
 
 	if (conn == curr_conn) {
 		discover_params.uuid = &count_char_uuid.uuid;
@@ -496,13 +615,13 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
 		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
-		err = bt_gatt_discover(curr_conn, &discover_params);
+		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
 			printk("Discover failed(err %d)\n", err);
 			return;
 		}
 	}
-
+	k_poll_signal_raise(&conn_sig,1);
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -519,6 +638,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	bt_conn_unref(curr_conn);
 	curr_conn = NULL;
+	atomic_set(&CONNECTED, 0);
+	k_poll_signal_raise(&conn_sig,1);
 }
 
 int main(void)
@@ -553,10 +674,14 @@ int main(void)
 	dw3xxx_configure_device(uwb, RANGING_RESPONDER, HRP_UWB_PHY_CHANNEL_9);
 	dw_enable_irq(uwb);
 
+
+	/* TODO: Change this so that the disconnect has a dedicated signal. */
+	k_poll_signal_init(&conn_sig);
+	k_poll_event_init(&conn_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &conn_sig);
 	/* Start and schedule */
 	k_work_schedule(&long_scan_work, K_NO_WAIT);
 	k_work_schedule(&short_scan_work, K_NO_WAIT);
-	k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
+	// k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
 
 	return 0;
 }
