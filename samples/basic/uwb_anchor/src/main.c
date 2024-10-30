@@ -133,7 +133,7 @@ static void start_ranging(void)
 	dw3xxx_update_sts_key(uwb, key);
 	dw3xxx_update_sts_iv(uwb, iv);
 
-	err = run_responder(uwb, Z_TIMEOUT_TICKS(1000));
+	err = run_responder(uwb, K_MSEC(10));
 	if (err) {
 		memset(timestamp, 0x00, sizeof(timestamp));
 		bt_rs_set_timestamp(timestamp);

@@ -10,6 +10,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/conn.h>
@@ -30,7 +31,7 @@ LOG_MODULE_REGISTER(app);
 #define LED0_NODE 		DT_ALIAS(led0)
 #define LONG_SCAN_INTERVAL_MS	(15 * 60 * 1000)	/* 15 Minutes */
 #define SHORT_SCAN_INTERVAL_MS	(1 * 60 * 1000)		/* 1 Minute */
-#define RANGING_INTERVAL_MS	(3 * 1000)		/* 3 Seconds */
+#define RANGING_INTERVAL_MS	(5 * 1000)		/* 5 Seconds */
 #define LONG_SCAN_DURATION_MS	(2000) 			/* 2 Second Active Scan */
 #define SHORT_SCAN_DURATION_MS	(500) 			/* 0.5 second Passive Scan */
 
@@ -135,7 +136,9 @@ static struct quick_anchor shortlist[ANCHOR_SHORTLIST_LEN]; /* Passive scan upda
 enum op_mode app_state = IDLE;
 static atomic_t CONNECTED = ATOMIC_INIT(0);
 struct k_poll_signal conn_sig;
+struct k_poll_signal write_complete_sig;
 struct k_poll_event conn_event[1];
+struct k_poll_event rng_event[1];
 
 static struct bt_uuid_128 rs_uuid = BT_UUID_INIT_128(BT_UUID_RS_VAL);
 static struct bt_uuid_128 count_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_COUNTER_CHAR_VAL);
@@ -478,14 +481,62 @@ static void do_ranging_handler(struct k_work *work)
 	app_state = IDLE;
 }
 
+static void gatt_write_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_write_params *params)
+{
+	// LOG_INF("Write complete. Handle = %d", params->handle); // Is it really complete here?
+
+	/* Send signal to indicate range command has been sent */
+	/* TODO: remove hardcoded reference to range command handle */
+	if (err) {
+		LOG_ERR("Gatt write failed. %s", bt_gatt_err_to_str(err));
+	} else {
+		LOG_INF("Gatt write succeeded");
+	}
+	if (params->handle == 24U) {
+		// k_poll_signal_raise(&write_complete_sig,1);
+	}
+
+	k_poll_signal_raise(&write_complete_sig,1);
+}
+
+static uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
+			    const void *data, uint16_t length)
+{
+	if (err) {
+		LOG_ERR("Gatt read failed. %s", bt_gatt_err_to_str(err));
+	}
+	/* TODO: parse the data here */
+	LOG_INF("Read complete");
+	return BT_GATT_ITER_STOP;
+}
+
 static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 {
 	int err;
 	/* Reschedule the next ranging event regardless of current system state */
-	// k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
+	struct bt_gatt_write_params write_params = {
+		.func = gatt_write_cb,
+		.handle = 0, 	// Temporary handle. To be changed when addresssing a specific characteristic
+		.offset = 0, 	// ???
+		.data = NULL, 	// Change to a pointer to data when sending
+		.length = 0	// Length of data being sent (bytes?)
+	};
+
+	struct bt_gatt_read_params read_params = {
+		.func = gatt_read_cb,
+		.handle_count = 1,	// Only one characteristic will be read at this stage
+		.single.handle = 0,	// Temporary handle. To be changed when addresssing a specific characteristic
+		.single.offset = 0
+	};
+
+	uint32_t uwb_counter = 0;
+	uint8_t rng_cmd = 0x01; // TODO: Change this to a defined constant in the rs.h file
+
+	/* Initiate the key and counter on the dw3000 */
+
 	while (1) {
+		/* TODO: decide whether to skip the ranging attempt or wait until scanning is complete. */
 		if (app_state == IDLE) {
-			/* No scanning is taking place.*/
 
 			app_state = RANGING;
 
@@ -510,20 +561,52 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 					break;
 				}
 				/* Wait until the device is connected */
-				err = k_poll(conn_event, 1, K_FOREVER);
+				err = k_poll(conn_event, 1, K_FOREVER); // TODO: add a timeout and a return value to indicate connection success
 				// k_poll_signal_check(&conn_sig, &signaled, &result);
 				k_poll_signal_reset(&conn_sig);
 				conn_event[0].state = K_POLL_STATE_NOT_READY;
 
 				for (int j = 0; j < MAX_RANGING_ATTEMPTS; j++) {
-					/* Write to the counter characteristic. Attribute handle = 17 */
-					
-					/* Write to the uwb counter (uwb device)*/
-					/* Send a ranging command. Attribute Handle = 23 */
-					/* Read from the timestamp characteristic. Attribute handle = 25 */
-				}
-				k_msleep(1000);
+					/* Create new counter and synchronise between devices */
+					uwb_counter = 0x12345678;
+					dw3xxx_update_sts_counter(uwb, uwb_counter);
+					uwb_counter = sys_cpu_to_be32(uwb_counter);
 
+					/* TODO: Create more than one write param instead of waiting for write complete signal */
+					/* Write to the counter characteristic. Attribute handle = 18 (check this with discovery) */
+					write_params.handle = 18U;
+					write_params.data = &uwb_counter;
+					write_params.length = sizeof(uwb_counter);
+					bt_gatt_write(curr_conn, &write_params);
+					/* Wait for write to complete */
+					k_poll(rng_event, 1, K_FOREVER); 
+					k_poll_signal_reset(&write_complete_sig);
+					rng_event[0].state = K_POLL_STATE_NOT_READY;
+					
+					/* Send a ranging command. Attribute Handle = 26 */
+					write_params.handle = 26U;
+					write_params.data = &rng_cmd;
+					write_params.length = sizeof(rng_cmd);
+					bt_gatt_write(curr_conn, &write_params);
+					/* Wait for write to complete */
+					err = k_poll(rng_event, 1, K_FOREVER); // TODO: add timeout and error handling
+					k_poll_signal_reset(&write_complete_sig);
+					rng_event[0].state = K_POLL_STATE_NOT_READY;
+
+					k_msleep(1);
+					/* DW3000 Run initiator after command has been sent */
+					run_initiator(uwb);
+
+					/* Sleep until ranging should be complete */
+					// k_msleep(2);
+
+					/* Read from the timestamp characteristic. Attribute handle = 24 */
+					// read_params.single.handle = 24U;
+					// bt_gatt_read(curr_conn, &read_params);
+
+					break; // Temporary break. Add check to see if ranging was successful.
+				}
+				k_msleep(5000);
 				bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 
 				/* Wait until the device has disconnected. */
@@ -558,7 +641,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 	// printk("[ATTRIBUTE] handle %u\n", attr->handle);
 
 	if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_COUNTER_CHAR)) {
-		LOG_INF("Counter characteristic ATTR handle: %u", attr->handle);
+		LOG_INF("Counter characteristic ATTR handle: %u : %u", attr->handle, bt_gatt_attr_value_handle(attr));
 		discover_params.uuid = &ts_char_uuid.uuid;
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
@@ -566,7 +649,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 			printk("Discover failed (err %d)\n", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_TS_CHAR)) {
-		LOG_INF("Timestamp characteristic ATTR handle: %u", attr->handle);
+		LOG_INF("Timestamp characteristic ATTR handle: %u : %u", attr->handle, bt_gatt_attr_value_handle(attr));
 		discover_params.uuid = &rc_char_uuid.uuid;
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
@@ -574,15 +657,12 @@ static uint8_t discover_func(struct bt_conn *conn,
 			printk("Discover failed (err %d)\n", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_RNGCMD_CHAR)) {
-		LOG_INF("Range Command characteristic ATTR handle: %u", attr->handle);
+		LOG_INF("Range Command characteristic ATTR handle: %u : %u", attr->handle, bt_gatt_attr_value_handle(attr));
 		return BT_GATT_ITER_STOP;
 		
 	} else {
-		discover_params.start_handle = attr->handle + 1;
-		err = bt_gatt_discover(conn, &discover_params);
-		if (err) {
-			printk("Discover failed (err %d)\n", err);
-		}
+		// discover_params.start_handle = attr->handle + 1;
+		return BT_GATT_ITER_CONTINUE;
 	}
 	return BT_GATT_ITER_STOP;
 }
@@ -608,19 +688,23 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	atomic_set(&CONNECTED, 1);
 	LOG_INF("Connected: %s", addr);
 
-	if (conn == curr_conn) {
-		discover_params.uuid = &count_char_uuid.uuid;
-		discover_params.func = discover_func;
-		discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
-		discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
-		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	/* TODO: Implement a cached handle system where every time a new device is connected to, the handles of 
+	each gatt attribute is stored. This discovery connection should be done prior to a ranging connection to 
+	minimise latency, not necessary but a nice to have. */
 
-		err = bt_gatt_discover(conn, &discover_params);
-		if (err) {
-			printk("Discover failed(err %d)\n", err);
-			return;
-		}
-	}
+	// if (conn == curr_conn) {
+	// 	discover_params.uuid = &count_char_uuid.uuid;
+	// 	discover_params.func = discover_func;
+	// 	discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+	// 	discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+	// 	discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+
+	// 	err = bt_gatt_discover(conn, &discover_params);
+	// 	if (err) {
+	// 		printk("Discover failed(err %d)\n", err);
+	// 		return;
+	// 	}
+	// }
 	k_poll_signal_raise(&conn_sig,1);
 }
 
@@ -671,13 +755,15 @@ int main(void)
 	bt_conn_cb_register(&connection_callbacks);
 
 	/* Configure UWB chip and driver */
-	dw3xxx_configure_device(uwb, RANGING_RESPONDER, HRP_UWB_PHY_CHANNEL_9);
+	dw3xxx_configure_device(uwb, RANGING_INITIATOR, HRP_UWB_PHY_CHANNEL_9);
 	dw_enable_irq(uwb);
-
 
 	/* TODO: Change this so that the disconnect has a dedicated signal. */
 	k_poll_signal_init(&conn_sig);
+	k_poll_signal_init(&write_complete_sig);
 	k_poll_event_init(&conn_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &conn_sig);
+	k_poll_event_init(&rng_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &write_complete_sig);
+
 	/* Start and schedule */
 	k_work_schedule(&long_scan_work, K_NO_WAIT);
 	k_work_schedule(&short_scan_work, K_NO_WAIT);
