@@ -12,6 +12,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
+#include <zephyr/bluetooth/gatt.h>
 
 #include <zephyr/drivers/ieee802154/deca_device_api.h>
 #include <zephyr/drivers/ieee802154/deca_interface.h>
@@ -162,6 +163,14 @@ static void iv_changed(void)
 	dw3xxx_update_sts_iv(uwb, iv);
 }
 
+void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+	printk("Updated MTU: TX: %d RX: %d bytes\n", tx, rx);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {
+	.att_mtu_updated = mtu_updated,
+};
 
 int main(void)
 {
@@ -184,6 +193,7 @@ int main(void)
 	}
 	/* Register Callbacks */
 	bt_conn_cb_register(&connection_callbacks);
+	bt_gatt_cb_register(&gatt_callbacks);
 	bt_rs_cb_init(&rs_callbacks);
 	
 	k_work_submit(&start_adv_worker);

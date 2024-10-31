@@ -142,8 +142,11 @@ struct k_poll_event rng_event[1];
 
 static struct bt_uuid_128 rs_uuid = BT_UUID_INIT_128(BT_UUID_RS_VAL);
 static struct bt_uuid_128 count_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_COUNTER_CHAR_VAL);
+static struct bt_uuid_128 key_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_KEY_CHAR_VAL);
+static struct bt_uuid_128 iv_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_IV_CHAR_VAL);
 static struct bt_uuid_128 ts_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_TS_CHAR_VAL);
 static struct bt_uuid_128 rc_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_RNGCMD_CHAR_VAL);
+static struct bt_uuid_16 ccc_char_uuid = BT_UUID_INIT_16(BT_UUID_GATT_CCC_VAL);
 
 /* ------------------------------------ Bluetooth Functions --------------------------------------- */
 /** @brief Check the status of the atomic bet CONNECTED which mirrors the bluetooth connection status
@@ -509,7 +512,19 @@ static uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_re
 	LOG_INF("Read complete");
 	return BT_GATT_ITER_STOP;
 }
+static uint8_t notify_func(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
+			   const void *data, uint16_t length)
+{
+	if (!data) {
+		printk("[UNSUBSCRIBED]\n");
+		params->value_handle = 0U;
+		return BT_GATT_ITER_STOP;
+	}
 
+	printk("[NOTIFICATION] data %p length %u\n", data, length);
+
+	return BT_GATT_ITER_CONTINUE;
+}
 static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 {
 	int err;
@@ -583,8 +598,8 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 					k_poll_signal_reset(&write_complete_sig);
 					rng_event[0].state = K_POLL_STATE_NOT_READY;
 					
-					/* Send a ranging command. Attribute Handle = 26 */
-					write_params.handle = 26U;
+					/* Send a ranging command. Attribute Handle = 27 */
+					write_params.handle = 27U;
 					write_params.data = &rng_cmd;
 					write_params.length = sizeof(rng_cmd);
 					bt_gatt_write(curr_conn, &write_params);
@@ -641,7 +656,23 @@ static uint8_t discover_func(struct bt_conn *conn,
 	// printk("[ATTRIBUTE] handle %u\n", attr->handle);
 
 	if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_COUNTER_CHAR)) {
-		LOG_INF("Counter characteristic ATTR handle: %u : %u", attr->handle, bt_gatt_attr_value_handle(attr));
+		LOG_INF("Counter characteristic ATTR val handle:  %u", bt_gatt_attr_value_handle(attr));
+		discover_params.uuid = &key_char_uuid.uuid;
+		discover_params.start_handle = attr->handle + 1;
+		err = bt_gatt_discover(conn, &discover_params);
+		if (err) {
+			printk("Discover failed (err %d)\n", err);
+		}
+	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_KEY_CHAR)) {
+		LOG_INF("Key characteristic ATTR val handle: %u", bt_gatt_attr_value_handle(attr));
+		discover_params.uuid = &iv_char_uuid.uuid;
+		discover_params.start_handle = attr->handle + 1;
+		err = bt_gatt_discover(conn, &discover_params);
+		if (err) {
+			printk("Discover failed (err %d)\n", err);
+		}
+	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_IV_CHAR)) {
+		LOG_INF("IV characteristic ATTR val handle: %u", bt_gatt_attr_value_handle(attr));
 		discover_params.uuid = &ts_char_uuid.uuid;
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
@@ -649,24 +680,65 @@ static uint8_t discover_func(struct bt_conn *conn,
 			printk("Discover failed (err %d)\n", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_TS_CHAR)) {
-		LOG_INF("Timestamp characteristic ATTR handle: %u : %u", attr->handle, bt_gatt_attr_value_handle(attr));
-		discover_params.uuid = &rc_char_uuid.uuid;
+		LOG_INF("Timestamp characteristic ATTR val handle:%u", bt_gatt_attr_value_handle(attr));
+		discover_params.uuid = &ccc_char_uuid.uuid;
 		discover_params.start_handle = attr->handle + 1;
+		discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
 		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
 			printk("Discover failed (err %d)\n", err);
 		}
-	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_RNGCMD_CHAR)) {
-		LOG_INF("Range Command characteristic ATTR handle: %u : %u", attr->handle, bt_gatt_attr_value_handle(attr));
-		return BT_GATT_ITER_STOP;
+	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_GATT_CCC)) {
+		LOG_INF("GATT CCC ATTR handle: %u", attr->handle);
+		discover_params.uuid = &rc_char_uuid.uuid;
+		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+		err = bt_gatt_discover(conn, &discover_params);
+		if (err) {
+			printk("Discover failed (err %d)\n", err);
+		}
 		
-	} else {
+	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_RNGCMD_CHAR)) {
+		LOG_INF("Range Command characteristic ATTR val handle: %u", bt_gatt_attr_value_handle(attr));
+		// discover_params.uuid = &ccc_char_uuid.uuid;
 		// discover_params.start_handle = attr->handle + 1;
+		// discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+		// err = bt_gatt_discover(conn, &discover_params);
+		// if (err) {
+		// 	printk("Discover failed (err %d)\n", err);
+		// }
+		return BT_GATT_ITER_STOP;
+	} else {
 		return BT_GATT_ITER_CONTINUE;
 	}
 	return BT_GATT_ITER_STOP;
 }
 
+static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
+			    struct bt_gatt_exchange_params *params)
+{
+	printk("%s: MTU exchange %s (%u)\n", __func__,
+	       err == 0U ? "successful" : "failed",
+	       bt_gatt_get_mtu(conn));
+}
+
+static struct bt_gatt_exchange_params mtu_exchange_params = {
+	.func = mtu_exchange_cb
+};
+
+static int mtu_exchange(struct bt_conn *conn)
+{
+	int err;
+
+	printk("%s: Current MTU = %u\n", __func__, bt_gatt_get_mtu(conn));
+
+	printk("%s: Exchange MTU...\n", __func__);
+	err = bt_gatt_exchange_mtu(conn, &mtu_exchange_params);
+	if (err) {
+		printk("%s: MTU exchange failed (err %d)", __func__, err);
+	}
+
+	return err;
+}
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	char addr[BT_ADDR_LE_STR_LEN];
@@ -686,25 +758,43 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		return;
 	}
 	atomic_set(&CONNECTED, 1);
+	(void)mtu_exchange(conn);
 	LOG_INF("Connected: %s", addr);
 
 	/* TODO: Implement a cached handle system where every time a new device is connected to, the handles of 
 	each gatt attribute is stored. This discovery connection should be done prior to a ranging connection to 
 	minimise latency, not necessary but a nice to have. */
 
-	// if (conn == curr_conn) {
-	// 	discover_params.uuid = &count_char_uuid.uuid;
-	// 	discover_params.func = discover_func;
-	// 	discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
-	// 	discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
-	// 	discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	/* Discovery */
+	// discover_params.uuid = &count_char_uuid.uuid;
+	// discover_params.func = discover_func;
+	// discover_params.start_handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
+	// discover_params.end_handle = BT_ATT_LAST_ATTRIBUTE_HANDLE;
+	// discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 
-	// 	err = bt_gatt_discover(conn, &discover_params);
-	// 	if (err) {
-	// 		printk("Discover failed(err %d)\n", err);
-	// 		return;
-	// 	}
+	// err = bt_gatt_discover(conn, &discover_params);
+	// if (err) {
+	// 	printk("Discover failed(err %d)\n", err);
+	// 	return;
 	// }
+
+	/* Subscribe to the read value. */
+	subscribe_params.value_handle = 24U;
+	subscribe_params.notify = notify_func;
+	subscribe_params.value = BT_GATT_CCC_INDICATE;
+	subscribe_params.ccc_handle = 25U;
+
+	err = bt_gatt_subscribe(conn, &subscribe_params);
+	if (err) {
+		if (err == -EALREADY) {
+			printk("[ALREADY SUBSCRIBED]\n");
+		} else {
+			printk("Subscribe failed (err %d)\n", err);
+		}
+	} else {
+		printk("[SUBSCRIBED]\n");
+	}
+
 	k_poll_signal_raise(&conn_sig,1);
 }
 

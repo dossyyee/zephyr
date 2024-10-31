@@ -50,7 +50,7 @@ typedef void (*bt_rs_range_cb_t)(void);
 static const struct bt_rs_cb *rs_cb;
 
 /* Wizardry */
-static const struct bt_gatt_attr *timestamp_attr;
+static const struct bt_gatt_attr *timestamp_attr = NULL;
 static struct bt_gatt_indicate_params ind_params;
 
  
@@ -161,6 +161,11 @@ static void indicate_cb(struct bt_conn *conn, struct bt_gatt_indicate_params *pa
 	}
 }
 
+static void indicate_destroy_cb(struct bt_gatt_indicate_params *params) 
+{
+	return;
+}
+
 static void timestamp_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
 	if (value & BT_GATT_CCC_INDICATE) {
@@ -193,12 +198,12 @@ BT_GATT_SERVICE_DEFINE(
 				BT_GATT_CHRC_READ | BT_GATT_CHRC_INDICATE,
 				BT_GATT_PERM_READ,
 				read_ts, NULL, NULL),
+	BT_GATT_CCC(timestamp_ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 	/* Ranging Command characteristic */
 	BT_GATT_CHARACTERISTIC(BT_UUID_RS_RNGCMD_CHAR,
 				BT_GATT_CHRC_WRITE,
 				BT_GATT_PERM_WRITE,
 				NULL, write_range_cmd, NULL),
-	BT_GATT_CCC(timestamp_ccc_cfg_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
  
 /* Get and set functions for key, IV, and counter */
@@ -239,10 +244,24 @@ void bt_rs_set_timestamp(uint64_t *ts)
 
 int bt_rs_indicate_timestamp(struct bt_conn *conn)
 {
-	int err = bt_gatt_indicate(conn, &ind_params);
+	// if (!bt_gatt_is_subscribed(conn, ind_params.attr, BT_GATT_CCC_INDICATE)) {
+	// 	LOG_ERR("Not subscribed to indications");
+	// 	return -1;
+	// }
+
+	int err = bt_gatt_indicate(NULL, &ind_params);
 
 	if (err) {
-		LOG_ERR("Failed to send indication: %d", err);
+		LOG_ERR("Failed to send indication: %s", bt_gatt_err_to_str(err));
+	}
+	return err;
+}
+
+int bt_rs_notify_timestamp(struct bt_conn *conn)
+{
+	int err = bt_gatt_notify(conn, timestamp_attr, timestamp.u8, sizeof(timestamp));
+	if (err) {
+		LOG_ERR("Failed to send indication: %s", bt_gatt_err_to_str(err));
 	}
 	return err;
 }
@@ -292,20 +311,28 @@ static int bt_rs_init()
     	sts_iv.u32[3] = CONFIG_BT_RS_IV_COUNT32;
 
 	/* Setup the timestamp indication parameters */
-	/* WARNING: The position of the timestamp characteristic in the service declaration
-	 * macro impacts which index is used here. Be mindful of this when making changes. */
-	timestamp_attr = &rs_svc.attrs[8];
+	for (int i = 0; i < rs_svc.attr_count; i++) {
+		/* Iterate through rs_svc and find the attribute with matching UUID */
+		if (!bt_uuid_cmp((&rs_svc.attrs[i])->uuid, BT_UUID_RS_TS_CHAR)) {
+			timestamp_attr = &rs_svc.attrs[i];
+			break;
+		}
+	}
 
 	/* Set up the indication parameters for the timestamp */
 	if (!timestamp_attr) {
-		LOG_ERR("Timestamp attribute uninitialised");
+		LOG_ERR("Failed to find Timestamp Attribute");
 		return -EINVAL;
 	}
-	memset(&ind_params, 0, sizeof(ind_params));
+
+	// printk("Permissions: %X\n", timestamp_attr->perm);
+
+	ind_params.uuid = NULL;//BT_UUID_RS_TS_CHAR;
 	ind_params.attr = timestamp_attr;
-	ind_params.func = indicate_cb;
 	ind_params.data = timestamp.u8;
 	ind_params.len = sizeof(timestamp);
+	ind_params.func = indicate_cb;
+	ind_params.destroy = indicate_destroy_cb;
 
     	return 0;
 }
