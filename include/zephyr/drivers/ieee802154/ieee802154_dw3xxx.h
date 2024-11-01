@@ -86,8 +86,6 @@ struct dw3xxx_config {
 
 struct dw3xxx_data {
 	struct gpio_callback irq_callback;
-        struct k_work isr_work;
-	// struct k_poll_signal irq_signal;
         struct k_poll_signal rx_sig;
         struct k_poll_event rng_event[1]; /* Ranging event */
         struct k_poll_signal radio_wakeup;
@@ -101,6 +99,21 @@ struct dw3xxx_data {
 
         struct dw_dstwr_ts_t timestamps;
         uint8_t rx_count;
+};
+
+enum isr_cb {
+        INITIATOR_TXDONE,
+        INITIATOR_RXOK,
+        INITIATOR_RXTO,
+        INITIATOR_RXERR,
+        INITIATOR_SPIERR,
+        INITIATOR_SPIRDY,
+        RESPONDER_TXDONE,
+        RESPONDER_RXOK,
+        RESPONDER_RXTO,
+        RESPONDER_RXERR,
+        RESPONDER_SPIERR,
+        RESPONDER_SPIRDY,
 };
 
 typedef enum

@@ -69,7 +69,13 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 /* Type Definitions ----------------------------------------------------------*/
 
 /* Function Declarations -----------------------------------------------------*/
+static void dw_isr_processing_thread(void *, void *, void *);
 
+#define DW_ISR_THREAD_STACK_SIZE 	1024
+#define DW_ISR_THREAD_PRIO		0
+K_THREAD_DEFINE(dw_isr_thread_id, DW_ISR_THREAD_STACK_SIZE,
+                dw_isr_processing_thread, NULL, NULL, NULL,
+                DW_ISR_THREAD_PRIO, 0, CONFIG_SYS_CLOCK_TICKS_PER_SEC/5);
 /* callbacks */
 // static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data);
 // static void initiator_ranging_rx_to_cb(const dwt_cb_data_t *cb_data);
@@ -86,8 +92,8 @@ static uint8_t inter_rx_buf[MAX_DATA_BUF_LEN] = {0};
 static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 };
 static dwt_sts_cp_iv_t sts_iv = { 0x1F9A3DE4, 0xD37EC3CA, 0xC44FA8FB, 0x362EEB34 };
 
-struct k_poll_signal rx_sig2;
-struct k_poll_event rng_event2[1];
+struct k_poll_signal dw_isr_sig;
+struct k_poll_event dw_isr_event[1];
 
 /* Private Variables ---------------------------------------------------------*/
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
@@ -550,6 +556,10 @@ void run_initiator_forever(const struct device* dev)
 static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
 	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig, INITIATOR_RXOK);
+}
+static void initiator_ranging_rx_ok(void)
+{
 	struct dw3xxx_data *data  = uwb->data;
 
 	uint32_t final_tx_time;
@@ -583,6 +593,10 @@ static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 static void initiator_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig,INITIATOR_RXTO);
+}
+static void initiator_ranging_rx_to(void)
+{
 	struct dw3xxx_data *data  = uwb->data;
 	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 }
@@ -590,13 +604,22 @@ static void initiator_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 static void initiator_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig,INITIATOR_RXERR);
+}
+static void initiator_ranging_rx_err(void)
+{
 	struct dw3xxx_data *data  = uwb->data;
 	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
 }
 
 static void initiator_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 {
-    (void)cb_data;
+	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig, INITIATOR_RXOK);
+}
+static void initiator_ranging_tx_done(void)
+{
+	return;
 }
 
 /* Responder in ranging mode functions */
@@ -616,7 +639,6 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 
 	// Wait for rx event for timeout (in ticks)
 	ret = k_poll(data->rng_event, 1, timeout);
-	// ret = k_poll(data->rng_event, 1, K_FOREVER);
 	k_poll_signal_check(&data->rx_sig, &signaled, &result);
 	k_poll_signal_reset(&data->rx_sig);
 	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
@@ -630,10 +652,8 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 		/* This means that the responding tx event have been scheduled and the rx timeout has been
 			set. At this point, wait for the final rx event. */
 		
-		// k_poll(data->rng_event, 1, K_MSEC(2));
-		// k_poll_signal_check(&data->rx_sig, &signaled, &result);
-		k_poll(rng_event2, 1, K_MSEC(2));
-		k_poll_signal_check(&rx_sig2, &signaled, &result);
+		k_poll(data->rng_event, 1, K_MSEC(2));
+		k_poll_signal_check(&data->rx_sig, &signaled, &result);
 		
 		if (signaled && (result == RX_EVENT_OK)) {
 			// LOG_INF("%llu %llu %llu", data->timestamps.ts1, data->timestamps.ts2, data->timestamps.ts3);
@@ -656,10 +676,8 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 	}
 
 
-	// k_poll_signal_reset(&data->rx_sig);
-	// data->rng_event[0].state = K_POLL_STATE_NOT_READY;
-	k_poll_signal_reset(&rx_sig2);
-	rng_event2[0].state = K_POLL_STATE_NOT_READY;
+	k_poll_signal_reset(&data->rx_sig);
+	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
 	return ret;
 }
 
@@ -676,6 +694,10 @@ void run_responder_forever(const struct device* dev)
 static void responder_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
 	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig, RESPONDER_RXOK);
+}
+static void responder_ranging_rx_ok(void)
+{
 	struct dw3xxx_data *data  = uwb->data;
 
 	uint32_t resp_tx_time;
@@ -707,8 +729,7 @@ static void responder_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 			// resp_tx_ts = get_tx_timestamp_u64();
 			data->timestamps.ts3 = get_rx_timestamp_u64();
 			data->rx_count = 0;
-			k_poll_signal_raise(&rx_sig2,RX_EVENT_OK);
-			// k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
+			k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
 		}
 
 	} else {
@@ -720,6 +741,10 @@ static void responder_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 static void responder_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig, RESPONDER_RXTO);
+}
+static void responder_ranging_rx_to(void)
+{
 	struct dw3xxx_data *data  = uwb->data;
 	data->rx_count = 0;
 	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR_TO);
@@ -728,6 +753,10 @@ static void responder_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 static void responder_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig, RESPONDER_RXERR);
+}
+static void responder_ranging_rx_err(void)
+{
 	struct dw3xxx_data *data  = uwb->data;
 	data->rx_count = 0;
 	k_poll_signal_raise(&data->rx_sig,RX_EVENT_ERROR);
@@ -735,27 +764,70 @@ static void responder_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
 
 static void responder_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 {
-    (void)cb_data;
+	(void)cb_data;
+	k_poll_signal_raise(&dw_isr_sig, RESPONDER_TXDONE);
+}
+static void responder_ranging_tx_done(void)
+{
+	return;
+}
+
+static void dw_isr_processing_thread(void *, void *, void *)
+{
+	int signaled, result;
+	int ret;
+	while (1) {
+		ret = k_poll(dw_isr_event, 1, K_FOREVER);
+		if (ret) {
+			/* process the error */
+		}
+
+		/* Get the outcome of the signal */
+		k_poll_signal_check(&dw_isr_sig, &signaled, &result);
+		k_poll_signal_reset(&dw_isr_sig);
+		dw_isr_event[0].state = K_POLL_STATE_NOT_READY;
+
+		switch (result) {
+		case INITIATOR_TXDONE:
+			initiator_ranging_tx_done();
+			break;
+		case INITIATOR_RXOK:
+			initiator_ranging_rx_ok();
+			break;
+		case INITIATOR_RXTO:
+			initiator_ranging_rx_to();
+			break;
+		case INITIATOR_RXERR:
+			initiator_ranging_rx_err();
+			break;
+		case INITIATOR_SPIERR:
+			break;
+		case INITIATOR_SPIRDY:
+			break;
+		case RESPONDER_TXDONE:
+			responder_ranging_tx_done();
+			break;
+		case RESPONDER_RXOK:
+			responder_ranging_rx_ok();
+			break;
+		case RESPONDER_RXTO:
+			responder_ranging_rx_to();
+			break;
+		case RESPONDER_RXERR:
+			responder_ranging_rx_err();
+			break;
+		case RESPONDER_SPIERR:
+			break;
+		case RESPONDER_SPIRDY:
+			break;
+		}
+	}
 }
 /*----------------------------------------------------------------------------*/
 
-static void dw3xxx_irq_handler(struct k_work* item)
-{
-	// struct dw3xxx_data *data = CONTAINER_OF(cb, struct dw3xxx_data, irq_callback);
-
-	/* Ensure that only one pin was triggered */
-	// __ASSERT(POPCOUNT(pins) == 1, "Unknown interrupts %02X", pins);
-
-	/* Send data ready signal */
-	// k_poll_signal_raise(&data->irq_signal, 1);
-	dwt_isr();
-}
-
 static void dw3xxx_hw_isr(const struct device* dev, struct gpio_callback* cb, uint32_t pins)
 {
-	struct dw3xxx_data *data = CONTAINER_OF(cb, struct dw3xxx_data, irq_callback);
-	k_work_submit(&data->isr_work);
-	
+	dwt_isr();
 }
 
 void dw_enable_irq(const struct device* dev)
@@ -942,8 +1014,8 @@ int dw3xxx_init(const struct device *dev)
 	// k_poll_signal_init(&data->irq_signal);
 	k_poll_signal_init(&data->rx_sig);
 	k_poll_event_init(&data->rng_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &data->rx_sig);
-	k_poll_signal_init(&rx_sig2);
-	k_poll_event_init(&rng_event2[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &rx_sig2);
+	k_poll_signal_init(&dw_isr_sig);
+	k_poll_event_init(&dw_isr_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &dw_isr_sig);
 
 	if (!spi_is_ready_dt(&cfg->bus)) {
 		LOG_ERR("SPI bus not ready %s", cfg->bus.bus->name);
@@ -956,7 +1028,6 @@ int dw3xxx_init(const struct device *dev)
 		return -ENODEV;
 	}
 
-	k_work_init(&data->isr_work, dw3xxx_irq_handler);
 	gpio_init_callback(&data->irq_callback, dw3xxx_hw_isr, BIT(cfg->irq_gpio.pin));
 	rc = gpio_add_callback(cfg->irq_gpio.port, &data->irq_callback);
 	if (rc < 0) {
