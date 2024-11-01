@@ -83,7 +83,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 static uint8_t inter_tx_buf[MAX_DATA_BUF_LEN] = {0};
 static uint8_t inter_rx_buf[MAX_DATA_BUF_LEN] = {0};
 
-static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 }; // implement set_sts_key func
+static dwt_sts_cp_key_t sts_key = { 0x14EB220F, 0xF86050A8, 0xD1D336AA, 0x14148674 };
 static dwt_sts_cp_iv_t sts_iv = { 0x1F9A3DE4, 0xD37EC3CA, 0xC44FA8FB, 0x362EEB34 };
 
 /* Private Variables ---------------------------------------------------------*/
@@ -454,20 +454,21 @@ void dw_reset(const struct device *dev)
 
 
 /*----------------------------------------------------------------------------*/
-/* TODO: make the key and iv a art of the device data.*/
-/* TODO: Add a check to make sure that the device is in a correct state for setting the key and IV */
-void dw3xxx_update_sts_key(const struct device *dev, uint32_t *key)
+/* TODO: make the key and iv a part of the device data.*/
+/* TODO: Add a check to make sure that the device is in a correct state for setting the key and IV 
+  When the device is in some sleep modes, spi communications will not work. */
+void dw3xxx_set_sts_key(const struct device *dev, uint32_t *key)
 {
 	memcpy(&sts_key, key, sizeof(sts_key));
 	dwt_configurestskey(&sts_key);
 }
 
-void dw3xxx_update_sts_iv(const struct device *dev, uint32_t *iv)
+void dw3xxx_set_sts_iv(const struct device *dev, uint32_t *iv)
 {
 	memcpy(&sts_iv, iv, sizeof(sts_iv));
 }
 
-void dw3xxx_update_sts_counter(const struct device *dev, uint32_t counter)
+void dw3xxx_set_sts_counter(const struct device *dev, uint32_t counter)
 {
 	sts_iv.iv3 = counter;
 }
@@ -476,6 +477,23 @@ void dw3xxx_get_timestamp(const struct device *dev, uint64_t *ts)
 {
 	struct dw3xxx_data *data  = dev->data;
 	memcpy(ts, &data->timestamps, 3 * sizeof(uint64_t));
+}
+
+uint32_t dw3xxx_get_sts_counter(const struct device *dev)
+{
+	return sts_iv.iv3;
+}
+
+void dw3xxx_get_sts_iv(const struct device *dev, uint32_t *iv)
+{
+	/* TODO: Should have a sts struct instead of uint32_t pointer */
+	memcpy(iv, &sts_iv, sizeof(sts_iv));
+}
+
+void dw3xxx_get_sts_key(const struct device *dev, uint32_t *key)
+{
+	/* TODO: Should have a sts struct instead of uint32_t pointer */
+	memcpy(key, &sts_key, sizeof(sts_key));
 }
 
 /*----------------------------------------------------------------------------*/
@@ -607,7 +625,7 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 	if (signaled && (result == RX_EVENT_OK)) {
 		/* This means that the responding tx event have been scheduled and the rx timeout has been
 			set. At this point, wait for the final rx event. */
-
+		
 		k_poll(data->rng_event, 1, K_MSEC(2));
 		k_poll_signal_check(&data->rx_sig, &signaled, &result);
 		

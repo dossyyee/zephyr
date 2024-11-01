@@ -118,21 +118,30 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 static void start_ranging(void)
 {
 	LOG_INF("Start Ranging");
-	uint32_t key[STS_UINT_LEN];
-	uint32_t iv[STS_UINT_LEN];
+	uint32_t key[STS_U32_LEN];
+	uint32_t iv[STS_U32_LEN];
 	uint64_t timestamp[3];
 
 	int err;
 
 	bt_rs_get_key(key);
 	bt_rs_get_iv(iv);
-
+	// printk("IV: 0x%08X 0x%08X 0x%08X 0x%08X\n", iv[0], iv[1], iv[2], iv[3]);
+	// printk("KEY: 0x%08X 0x%08X 0x%08X 0x%08X\n", key[0], key[1], key[2], key[3]);
 	/* Temporarily the key and iv should be updated here. It should already be consistant with the 
 	 * bluetooth service, but in case the callbacks have not been implemented or the key and iv have
 	* not been initiated yet */
 
-	dw3xxx_update_sts_key(uwb, key);
-	dw3xxx_update_sts_iv(uwb, iv);
+	dw3xxx_set_sts_key(uwb, key);
+	dw3xxx_set_sts_iv(uwb, iv);
+
+
+	// uint32_t tmp[STS_U32_LEN];
+	// dw3xxx_get_sts_iv(uwb, tmp);
+	// printk("IV: 0x%08X 0x%08X 0x%08X 0x%08X\n", tmp[0], tmp[1], tmp[2], tmp[3]);
+
+	// dw3xxx_get_sts_key(uwb, tmp);
+	// printk("KEY: 0x%08X 0x%08X 0x%08X 0x%08X\n", tmp[0], tmp[1], tmp[2], tmp[3]);
 
 	err = run_responder(uwb, K_MSEC(10));
 	if (err) {
@@ -150,17 +159,17 @@ static void start_ranging(void)
 static void key_changed(void)
 {
 	/* Update the dw3000 device key*/
-	uint32_t key[STS_UINT_LEN];
+	uint32_t key[STS_U32_LEN];
 	bt_rs_get_key(key);
-	dw3xxx_update_sts_key(uwb, key);
+	dw3xxx_set_sts_key(uwb, key);
 }
 
 static void iv_changed(void)
 {
 	/* Update the dw3000 device iv*/
-	uint32_t iv[STS_UINT_LEN];
+	uint32_t iv[STS_U32_LEN];
 	bt_rs_get_iv(iv);
-	dw3xxx_update_sts_iv(uwb, iv);
+	dw3xxx_set_sts_iv(uwb, iv);
 }
 
 void mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)

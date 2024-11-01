@@ -200,7 +200,7 @@ typedef enum{
 static const uint8_t tx_pwr_lut_ch5[64] = {
 
 };
-// make a python script which creates the lookup table which is optimised for the lowest possible coarse grain for an 
+// make a python script which creates the lookup table which is optimised for the lowest possible coarse grain for a 
 // given input
 
 
@@ -213,12 +213,15 @@ void dw_reset(const struct device *dev);
 void dw_enable_irq(const struct device* dev);
 void dw_disable_irq(const struct device* dev);
 int dw3xxx_configure_device(const struct device* dev, dw_configrole_e role, uint8_t channel);
-void dw3xxx_update_sts_key(const struct device *dev, uint32_t *key);
-void dw3xxx_update_sts_iv(const struct device *dev, uint32_t *iv);
-void dw3xxx_update_sts_counter(const struct device *dev, uint32_t iv);
+void dw3xxx_set_sts_key(const struct device *dev, uint32_t *key);
+void dw3xxx_set_sts_iv(const struct device *dev, uint32_t *iv);
+void dw3xxx_set_sts_counter(const struct device *dev, uint32_t iv);
 void dw3xxx_get_timestamp(const struct device *dev, uint64_t *ts);
+uint32_t dw3xxx_get_sts_counter(const struct device *dev);
+void dw3xxx_get_sts_iv(const struct device *dev, uint32_t *iv);
+void dw3xxx_get_sts_key(const struct device *dev, uint32_t *key);
 
-// Placeholder unctions for demo
+// Placeholder functions for demo
 void run_initiator_forever(const struct device* dev);
 void run_responder_forever(const struct device* dev);
 

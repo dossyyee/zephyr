@@ -137,8 +137,10 @@ enum op_mode app_state = IDLE;
 static atomic_t CONNECTED = ATOMIC_INIT(0);
 struct k_poll_signal conn_sig;
 struct k_poll_signal write_complete_sig;
+struct k_poll_signal timestamp_indication_sig;
 struct k_poll_event conn_event[1];
 struct k_poll_event rng_event[1];
+struct k_poll_event ind_event[1];
 
 static struct bt_uuid_128 rs_uuid = BT_UUID_INIT_128(BT_UUID_RS_VAL);
 static struct bt_uuid_128 count_char_uuid = BT_UUID_INIT_128(BT_UUID_RS_COUNTER_CHAR_VAL);
@@ -181,7 +183,7 @@ static bool is_anchor(struct bt_data *data, void *user_data)
 		// bt_uuid_to_str(BT_UUID_RS, rs_uuid_str, BT_UUID_STR_LEN);
 		// printk("UUID128 adv. UUID: %s\tRS UUID: %s\n", uuid_str, rs_uuid_str);
 		// if (!bt_uuid_cmp(&rs_uuid.uuid, u)) {
-		if (!memcmp(rs_uuid.val, data->data, 16)) {	/* TODO: Check that this will work as expected! */
+		if (!memcmp(rs_uuid.val, data->data, 16)) {
 			*found = true;
 			/* return false to indicate that no more advertisement data should be parsed */
 			return false;
@@ -448,7 +450,7 @@ static void do_ranging_handler(struct k_work *work)
 		if (err) {
 			char addr_str[BT_ADDR_LE_STR_LEN];
 			bt_addr_le_to_str(&anchor_list[i].addr, addr_str, sizeof(addr_str));
-			printk("Create conn to %s failed (%d). %s\n", addr_str, err, bt_hci_err_to_str(err));
+			LOG_ERR("Create conn to %s failed (%d). %s", addr_str, err, bt_hci_err_to_str(err));
 			break;
 		}
 		/* Wait until the device is connected */
@@ -493,17 +495,13 @@ static void gatt_write_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_writ
 	if (err) {
 		LOG_ERR("Gatt write failed. %s", bt_gatt_err_to_str(err));
 	} else {
-		LOG_INF("Gatt write succeeded");
-	}
-	if (params->handle == 24U) {
-		// k_poll_signal_raise(&write_complete_sig,1);
+		// LOG_INF("Gatt write succeeded");
 	}
 
-	k_poll_signal_raise(&write_complete_sig,1);
+	k_poll_signal_raise(&write_complete_sig, 1);
 }
 
-static uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params,
-			    const void *data, uint16_t length)
+static uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_read_params *params, const void *data, uint16_t length)
 {
 	if (err) {
 		LOG_ERR("Gatt read failed. %s", bt_gatt_err_to_str(err));
@@ -512,17 +510,21 @@ static uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_re
 	LOG_INF("Read complete");
 	return BT_GATT_ITER_STOP;
 }
-static uint8_t notify_func(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
-			   const void *data, uint16_t length)
+
+static uint8_t notify_func(struct bt_conn *conn, struct bt_gatt_subscribe_params *params, const void *data, uint16_t length)
 {
 	if (!data) {
-		printk("[UNSUBSCRIBED]\n");
+		LOG_INF("[UNSUBSCRIBED]");
 		params->value_handle = 0U;
 		return BT_GATT_ITER_STOP;
 	}
 
-	printk("[NOTIFICATION] data %p length %u\n", data, length);
+	uint64_t ts[3];
 
+	memcpy(ts, data, length);
+
+	LOG_INF("Timestamp: %llu %llu %llu", ts[0], ts[1], ts[2]);
+	k_poll_signal_raise(&timestamp_indication_sig, 1);
 	return BT_GATT_ITER_CONTINUE;
 }
 static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
@@ -567,12 +569,12 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 					continue;
 				}
 				
-				/* 1. Start a connection */
+				/* Start a connection */
 				err = bt_conn_le_create(&anchor_list[i].addr, conn_create_param, BT_LE_CONN_PARAM_DEFAULT, &curr_conn);
 				if (err) {
 					char addr_str[BT_ADDR_LE_STR_LEN];
 					bt_addr_le_to_str(&anchor_list[i].addr, addr_str, sizeof(addr_str));
-					printk("Create conn to %s failed (%d). %s\n", addr_str, err, bt_hci_err_to_str(err));
+					LOG_ERR("Create conn to %s failed (%d). %s", addr_str, err, bt_hci_err_to_str(err));
 					break;
 				}
 				/* Wait until the device is connected */
@@ -584,8 +586,7 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 				for (int j = 0; j < MAX_RANGING_ATTEMPTS; j++) {
 					/* Create new counter and synchronise between devices */
 					uwb_counter = 0x12345678;
-					dw3xxx_update_sts_counter(uwb, uwb_counter);
-					uwb_counter = sys_cpu_to_be32(uwb_counter);
+					dw3xxx_set_sts_counter(uwb, uwb_counter);
 
 					/* TODO: Create more than one write param instead of waiting for write complete signal */
 					/* Write to the counter characteristic. Attribute handle = 18 (check this with discovery) */
@@ -594,7 +595,7 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 					write_params.length = sizeof(uwb_counter);
 					bt_gatt_write(curr_conn, &write_params);
 					/* Wait for write to complete */
-					k_poll(rng_event, 1, K_FOREVER); 
+					k_poll(rng_event, 1, K_FOREVER);
 					k_poll_signal_reset(&write_complete_sig);
 					rng_event[0].state = K_POLL_STATE_NOT_READY;
 					
@@ -608,25 +609,26 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 					k_poll_signal_reset(&write_complete_sig);
 					rng_event[0].state = K_POLL_STATE_NOT_READY;
 
-					k_msleep(1);
 					/* DW3000 Run initiator after command has been sent */
-					run_initiator(uwb);
+					err = run_initiator(uwb);
+					if (err) {
+						LOG_ERR("UWB initiator failed: %d", err);
+					} else {
+						LOG_INF("UWB initiator success");
+					}
 
-					/* Sleep until ranging should be complete */
-					// k_msleep(2);
+					/* Wait for the timestamp indication */
+					err = k_poll(ind_event, 1, K_FOREVER); // TODO: add timeout and error handling
+					k_poll_signal_reset(&timestamp_indication_sig);
+					ind_event[0].state = K_POLL_STATE_NOT_READY;
 
-					/* Read from the timestamp characteristic. Attribute handle = 24 */
-					// read_params.single.handle = 24U;
-					// bt_gatt_read(curr_conn, &read_params);
-
-					break; // Temporary break. Add check to see if ranging was successful.
+					// break; // Temporary break. Add check to see if ranging was successful.
 				}
-				k_msleep(5000);
+				
 				bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 
 				/* Wait until the device has disconnected. */
 				err = k_poll(conn_event, 1, K_FOREVER);
-				// k_poll_signal_check(&conn_sig, &signaled, &result);
 				k_poll_signal_reset(&conn_sig);
 				conn_event[0].state = K_POLL_STATE_NOT_READY;
 			}
@@ -648,7 +650,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 	int err;
 
 	if (!attr) {
-		printk("Discover complete\n");
+		LOG_INF("Discover complete");
 		(void)memset(params, 0, sizeof(*params));
 		return BT_GATT_ITER_STOP;
 	}
@@ -661,7 +663,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
-			printk("Discover failed (err %d)\n", err);
+			LOG_DBG("Discover failed (err %d)", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_KEY_CHAR)) {
 		LOG_INF("Key characteristic ATTR val handle: %u", bt_gatt_attr_value_handle(attr));
@@ -669,7 +671,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
-			printk("Discover failed (err %d)\n", err);
+			LOG_DBG("Discover failed (err %d)", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_IV_CHAR)) {
 		LOG_INF("IV characteristic ATTR val handle: %u", bt_gatt_attr_value_handle(attr));
@@ -677,7 +679,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 		discover_params.start_handle = attr->handle + 1;
 		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
-			printk("Discover failed (err %d)\n", err);
+			LOG_DBG("Discover failed (err %d)", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_TS_CHAR)) {
 		LOG_INF("Timestamp characteristic ATTR val handle:%u", bt_gatt_attr_value_handle(attr));
@@ -686,7 +688,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 		discover_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
 		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
-			printk("Discover failed (err %d)\n", err);
+			LOG_DBG("Discover failed (err %d)", err);
 		}
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_GATT_CCC)) {
 		LOG_INF("GATT CCC ATTR handle: %u", attr->handle);
@@ -694,7 +696,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 		discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 		err = bt_gatt_discover(conn, &discover_params);
 		if (err) {
-			printk("Discover failed (err %d)\n", err);
+			LOG_DBG("Discover failed (err %d)", err);
 		}
 		
 	} else if (!bt_uuid_cmp(discover_params.uuid, BT_UUID_RS_RNGCMD_CHAR)) {
@@ -716,9 +718,7 @@ static uint8_t discover_func(struct bt_conn *conn,
 static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
 			    struct bt_gatt_exchange_params *params)
 {
-	printk("%s: MTU exchange %s (%u)\n", __func__,
-	       err == 0U ? "successful" : "failed",
-	       bt_gatt_get_mtu(conn));
+	LOG_INF("%s: MTU exchange %s (%u)", __func__, err == 0U ? "successful" : "failed", bt_gatt_get_mtu(conn));
 }
 
 static struct bt_gatt_exchange_params mtu_exchange_params = {
@@ -729,12 +729,12 @@ static int mtu_exchange(struct bt_conn *conn)
 {
 	int err;
 
-	printk("%s: Current MTU = %u\n", __func__, bt_gatt_get_mtu(conn));
+	LOG_INF("%s: Current MTU = %u", __func__, bt_gatt_get_mtu(conn));
 
-	printk("%s: Exchange MTU...\n", __func__);
+	LOG_INF("%s: Exchange MTU...", __func__);
 	err = bt_gatt_exchange_mtu(conn, &mtu_exchange_params);
 	if (err) {
-		printk("%s: MTU exchange failed (err %d)", __func__, err);
+		LOG_ERR("%s: MTU exchange failed (err %d)", __func__, err);
 	}
 
 	return err;
@@ -759,7 +759,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	}
 	atomic_set(&CONNECTED, 1);
 	(void)mtu_exchange(conn);
-	LOG_INF("Connected: %s", addr);
+	LOG_INF("Connected to address: %s", addr);
 
 	/* TODO: Implement a cached handle system where every time a new device is connected to, the handles of 
 	each gatt attribute is stored. This discovery connection should be done prior to a ranging connection to 
@@ -787,12 +787,12 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	err = bt_gatt_subscribe(conn, &subscribe_params);
 	if (err) {
 		if (err == -EALREADY) {
-			printk("[ALREADY SUBSCRIBED]\n");
+			LOG_INF("[ALREADY SUBSCRIBED]");
 		} else {
-			printk("Subscribe failed (err %d)\n", err);
+			LOG_ERR("Subscribe failed (err %d)", err);
 		}
 	} else {
-		printk("[SUBSCRIBED]\n");
+		LOG_INF("[SUBSCRIBED]");
 	}
 
 	k_poll_signal_raise(&conn_sig,1);
@@ -808,7 +808,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
-	printk("Disconnected: %s, reason 0x%02x %s\n", addr, reason, bt_hci_err_to_str(reason));
+	LOG_INF("Disconnected: %s, reason 0x%02x %s", addr, reason, bt_hci_err_to_str(reason));
 
 	bt_conn_unref(curr_conn);
 	curr_conn = NULL;
@@ -818,7 +818,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 int main(void)
 {
-	printk("Entering Main\n");
+	LOG_INF("Entering Main");
 	
 	/* Set up LED for debugging */
 	int err;
@@ -838,7 +838,7 @@ int main(void)
 	/* Enable Bluetooth */
 	err = bt_enable(NULL);
 	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);
+		LOG_ERR("Bluetooth init failed (err %d)\n", err);
 		return 0;
 	}
 	/* Register connection callbacks */
@@ -851,8 +851,10 @@ int main(void)
 	/* TODO: Change this so that the disconnect has a dedicated signal. */
 	k_poll_signal_init(&conn_sig);
 	k_poll_signal_init(&write_complete_sig);
+	k_poll_signal_init(&timestamp_indication_sig);
 	k_poll_event_init(&conn_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &conn_sig);
 	k_poll_event_init(&rng_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &write_complete_sig);
+	k_poll_event_init(&ind_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &timestamp_indication_sig);
 
 	/* Start and schedule */
 	k_work_schedule(&long_scan_work, K_NO_WAIT);

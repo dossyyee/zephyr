@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <zephyr/bluetooth/uuid.h>
 
-#define STS_UINT_LEN	4
+#define STS_U32_LEN	4
 
 /* UUID declarations */
 #define BT_UUID_RS_VAL			BT_UUID_128_ENCODE(0x49aa9800, 0x34c9, 0x40ca, 0x95db, 0x4eea1a31a229)

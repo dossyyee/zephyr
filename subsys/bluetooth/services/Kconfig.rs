@@ -8,6 +8,12 @@ menuconfig BT_RS
 
 if BT_RS
 
+# config USE_DEFAULT_STS_KEY_IV
+# 	bool "Use default sts key and iv (not recommended)"
+# 	default y
+# 	help
+# 	  The default key and iv for the sts of ieee802.15.4z specification
+
 config BT_RS_IV_UPPER96
 	string "Upper 96 bits of the STS Input Vector"
 	default "1F9A3DE4D37EC3CAC44FA8FB"
