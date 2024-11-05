@@ -71,8 +71,8 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 /* Function Declarations -----------------------------------------------------*/
 static void dw_isr_processing_thread(void *, void *, void *);
 
-#define DW_ISR_THREAD_STACK_SIZE 	1024
-#define DW_ISR_THREAD_PRIO		0
+#define DW_ISR_THREAD_STACK_SIZE 	2048
+#define DW_ISR_THREAD_PRIO		1
 K_THREAD_DEFINE(dw_isr_thread_id, DW_ISR_THREAD_STACK_SIZE,
                 dw_isr_processing_thread, NULL, NULL, NULL,
                 DW_ISR_THREAD_PRIO, 0, CONFIG_SYS_CLOCK_TICKS_PER_SEC/5);
@@ -349,98 +349,96 @@ release_write:
 	return rc;
 }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
-static int dw_spi_fast_command(const struct device *dev, dw_fast_command_packet_e command)
-{
-        uint8_t buf = command;
+// static int dw_spi_fast_command(const struct device *dev, dw_fast_command_packet_e command)
+// {
+//         uint8_t buf = command;
         
-        /* Fast command consists of an 8 bit packet with no additional data. */
-        return dw_spi_write(dev, 1, &buf, 0, NULL);
-}
+//         /* Fast command consists of an 8 bit packet with no additional data. */
+//         return dw_spi_write(dev, 1, &buf, 0, NULL);
+// }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
-static int dw_short_addr_read(const struct device *dev, dw_base_addr_e base, uint32_t data_len,
-		       	uint8_t *data)
-{
-        uint8_t buf = base;
+// static int dw_short_addr_read(const struct device *dev, dw_base_addr_e base, uint32_t data_len,
+// 		       	uint8_t *data)
+// {
+//         uint8_t buf = base;
 
-        return dw_spi_read(dev, 1, &buf, data_len, data);
-}
+//         return dw_spi_read(dev, 1, &buf, data_len, data);
+// }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
-static int dw_short_addr_write(const struct device *dev, dw_base_addr_e base, uint32_t data_len,
-		       	uint8_t *data)
-{
-        uint8_t buf = 0x80 | base;
+// static int dw_short_addr_write(const struct device *dev, dw_base_addr_e base, uint32_t data_len,
+// 		       	uint8_t *data)
+// {
+//         uint8_t buf = 0x80 | base;
 
-        return dw_spi_write(dev, 1, &buf, data_len, data);
-}
+//         return dw_spi_write(dev, 1, &buf, data_len, data);
+// }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
-static int dw_full_addr_read(const struct device *dev, dw_full_addr_e addr, uint32_t data_len, 
-			uint8_t *data)
-{
-	uint8_t header[2] = {(addr >> 8), (addr & 0xFF)};
-	return dw_spi_read(dev, sizeof(header), header, data_len, data);
-}
+// static int dw_full_addr_read(const struct device *dev, dw_full_addr_e addr, uint32_t data_len, 
+// 			uint8_t *data)
+// {
+// 	uint8_t header[2] = {(addr >> 8), (addr & 0xFF)};
+// 	return dw_spi_read(dev, sizeof(header), header, data_len, data);
+// }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
-static int dw_full_addr_write(const struct device *dev, dw_full_addr_e addr, uint32_t data_len, 
-			uint8_t *data)
-{
-	uint8_t header[2] = {(addr >> 8) | 0x80, (addr & 0xFF)};
-	return dw_spi_write(dev, sizeof(header), header, data_len, data);
-}
+// static int dw_full_addr_write(const struct device *dev, dw_full_addr_e addr, uint32_t data_len, 
+// 			uint8_t *data)
+// {
+// 	uint8_t header[2] = {(addr >> 8) | 0x80, (addr & 0xFF)};
+// 	return dw_spi_write(dev, sizeof(header), header, data_len, data);
+// }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
-static int dw_full_addr_masked_write(const struct device *dev, dw_full_addr_e addr, uint32_t data_len, 
-			uint8_t *data)
-{
-	uint8_t header[2] = {(addr >> 8) | 0x80, (addr & 0xFF)};
+// static int dw_full_addr_masked_write(const struct device *dev, dw_full_addr_e addr, uint32_t data_len, 
+// 			uint8_t *data)
+// {
+// 	uint8_t header[2] = {(addr >> 8) | 0x80, (addr & 0xFF)};
 
-	switch (data_len)
-	{
-	/*
-	 * Data length of 2 indicates mode 1. 1 octal AND and OR masks
-	 * Data length of 4 indicates mode 2. 2 octal AND and OR masks
-	 * Data length of 8 indicates mode 3. 4 octal And and OR masks
-	 * Data length other than these values is invalid.
-	 */
-	case BIT(1):
-	case BIT(2):
-		header[1] |= data_len >> 1;
-		break;
-	case BIT(3):
-		header[1] |= 0x03;
-		break;
-	default:
-		LOG_ERR("Invalid Masked Write Length");
-		return -EINVAL;
-		break;
-	}
+// 	switch (data_len)
+// 	{
+// 	/*
+// 	 * Data length of 2 indicates mode 1. 1 octal AND and OR masks
+// 	 * Data length of 4 indicates mode 2. 2 octal AND and OR masks
+// 	 * Data length of 8 indicates mode 3. 4 octal And and OR masks
+// 	 * Data length other than these values is invalid.
+// 	 */
+// 	case BIT(1):
+// 	case BIT(2):
+// 		header[1] |= data_len >> 1;
+// 		break;
+// 	case BIT(3):
+// 		header[1] |= 0x03;
+// 		break;
+// 	default:
+// 		LOG_ERR("Invalid Masked Write Length");
+// 		return -EINVAL;
+// 		break;
+// 	}
 
-	return dw_spi_write(dev, sizeof(header), header, data_len, data);
-}
+// 	return dw_spi_write(dev, sizeof(header), header, data_len, data);
+// }
 
-/*----------------------------------------------------------------------------*/
+// /*----------------------------------------------------------------------------*/
 
 void dw_wakeup(const struct device *dev)
 {
 	const struct dw3xxx_config *cfg = dev->config;
-	printk("wakeup\n");
 
-	if (&cfg->wkp_gpio.port != NULL) {
+	if (gpio_is_ready_dt(&cfg->wkp_gpio)) {
 		LOG_INF("GPIO_WAKEUP");
 		gpio_pin_set_dt(&cfg->wkp_gpio, GPIO_OUTPUT_ACTIVE);
 		k_sleep(K_USEC(200));
 		gpio_pin_set_dt(&cfg->wkp_gpio, GPIO_OUTPUT_INACTIVE);
-
 	} else {
 		LOG_INF("SPI Wakeup");
 		gpio_pin_set_dt(&cfg->bus.config.cs.gpio, GPIO_OUTPUT_ACTIVE);
@@ -624,6 +622,7 @@ static void initiator_ranging_tx_done(void)
 
 /* Responder in ranging mode functions */
 /* TODO: add a timeout parameter to the function.*/
+
 int run_responder(const struct device* dev, k_timeout_t timeout) 
 {
 	struct dw3xxx_data *data  = dev->data;
@@ -654,6 +653,9 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 		
 		k_poll(data->rng_event, 1, K_MSEC(2));
 		k_poll_signal_check(&data->rx_sig, &signaled, &result);
+
+		// k_poll(dw_isr_event, 1, K_MSEC(2));
+		// k_poll_signal_check(&dw_isr_sig, &signaled, &result);
 		
 		if (signaled && (result == RX_EVENT_OK)) {
 			// LOG_INF("%llu %llu %llu", data->timestamps.ts1, data->timestamps.ts2, data->timestamps.ts3);
@@ -678,6 +680,8 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 
 	k_poll_signal_reset(&data->rx_sig);
 	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+	// k_poll_signal_reset(&dw_isr_sig);
+	// dw_isr_event[0].state = K_POLL_STATE_NOT_READY;
 	return ret;
 }
 
@@ -730,6 +734,8 @@ static void responder_ranging_rx_ok(void)
 			data->timestamps.ts3 = get_rx_timestamp_u64();
 			data->rx_count = 0;
 			k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
+			// k_poll_signal_raise(&dw_isr_sig, RX_EVENT_OK);
+			LOG_ERR("2nd Polled");
 		}
 
 	} else {
@@ -1011,49 +1017,54 @@ int dw3xxx_init(const struct device *dev)
 
 	printk("DW3xxx init\n");
 
-	// k_poll_signal_init(&data->irq_signal);
+	/* Setup synchronisation signals */
 	k_poll_signal_init(&data->rx_sig);
 	k_poll_event_init(&data->rng_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &data->rx_sig);
 	k_poll_signal_init(&dw_isr_sig);
 	k_poll_event_init(&dw_isr_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &dw_isr_sig);
 
+	/* Critical Devices */
 	if (!spi_is_ready_dt(&cfg->bus)) {
 		LOG_ERR("SPI bus not ready %s", cfg->bus.bus->name);
 		return -ENODEV;
 	}
 
 	/* Setup the irq interrupt, to be enabled later */
-	if (!device_is_ready(cfg->irq_gpio.port)) {
-		LOG_ERR("GPIO device %s is not ready", cfg->irq_gpio.port->name);
+	if (device_is_ready(cfg->irq_gpio.port)) {
+		gpio_init_callback(&data->irq_callback, dw3xxx_hw_isr, BIT(cfg->irq_gpio.pin));
+		rc = gpio_add_callback(cfg->irq_gpio.port, &data->irq_callback);
+		if (rc < 0) {
+			LOG_ERR("Failed to initialise data ready callback!");
+			return rc;
+		}
+		gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
+	} else {
+		LOG_ERR("IRQ GPIO device is not ready");
 		return -ENODEV;
 	}
 
-	gpio_init_callback(&data->irq_callback, dw3xxx_hw_isr, BIT(cfg->irq_gpio.pin));
-	rc = gpio_add_callback(cfg->irq_gpio.port, &data->irq_callback);
-	if (rc < 0) {
-		LOG_ERR("Failed to initialise data ready callback!");
-		return rc;
-	}
-	gpio_pin_interrupt_configure_dt(&cfg->irq_gpio, GPIO_INT_DISABLE);
-
-	/* Setup the wakeup pin */
-	if (!device_is_ready(cfg->wkp_gpio.port)) {
-		LOG_ERR("GPIO device %s is not ready", cfg->wkp_gpio.port->name);
+	/* Reset Pin */
+	if (gpio_is_ready_dt(&cfg->rst_gpio)) {
+		rc = gpio_pin_configure_dt(&cfg->rst_gpio, GPIO_INPUT);
+		if (rc < 0) {
+			LOG_ERR("Failed to configure reset gpio!");
+			return rc;
+		}
+	} else {
+		LOG_ERR("Reset GPIO device is not ready");
 		return -ENODEV;
 	}
-	rc = gpio_pin_configure_dt(&cfg->wkp_gpio, GPIO_OUTPUT_ACTIVE);
-	if (rc < 0) {
-		LOG_ERR("Failed to configure Wakeup gpio!");
-		return rc;
-	}
 
-	/* Setup the reset pin */
-	rc = gpio_pin_configure_dt(&cfg->rst_gpio, GPIO_INPUT);
-	if (rc < 0) {
-		LOG_ERR("Failed to configure reset gpio!");
-		return rc;
+	/* Not so critical Devices */
+	if (gpio_is_ready_dt(&cfg->wkp_gpio)) {
+		rc = gpio_pin_configure_dt(&cfg->wkp_gpio, GPIO_OUTPUT_ACTIVE);
+		if (rc < 0) {
+			LOG_ERR("Failed to configure Wakeup gpio!");
+		}
+	} else {
+		LOG_ERR("Wakeup GPIO device is not ready");
 	}
-
+	
 	return pm_device_driver_init(dev, dw3xxx_pm_control);
 }
 
@@ -1094,7 +1105,7 @@ void set_tx_power(int16_t dbm) {
 	static const struct dw3xxx_config dw3xxx_config_##n = {                             \
 		.bus = SPI_DT_SPEC_INST_GET(n, DW3XXX_SPI_OP_MODE, 0),                      \
 		.irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                            \
-		.wkp_gpio = GPIO_DT_SPEC_INST_GET(n, wakeup_gpios),				\
+		.wkp_gpio = GPIO_DT_SPEC_INST_GET_OR(n, wakeup_gpios, {0}),				\
 		.rst_gpio = GPIO_DT_SPEC_INST_GET(n, reset_gpios),				\
 	};                                                                                  \
 	PM_DEVICE_DT_INST_DEFINE(n, dw3xxx_pm_control);                                     \

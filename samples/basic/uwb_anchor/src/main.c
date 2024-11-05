@@ -14,6 +14,8 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 
+#include <zephyr/timing/timing.h>
+
 #include <zephyr/drivers/ieee802154/deca_device_api.h>
 #include <zephyr/drivers/ieee802154/deca_interface.h>
 #include <zephyr/drivers/ieee802154/deca_types.h>
@@ -184,6 +186,9 @@ static struct bt_gatt_cb gatt_callbacks = {
 int main(void)
 {
 	printk("Entering Main\n");
+
+	timing_init();
+    	timing_start();
 	
 	int err;
 	if (!gpio_is_ready_dt(&led)) {
@@ -206,6 +211,7 @@ int main(void)
 	bt_rs_cb_init(&rs_callbacks);
 	
 	k_work_submit(&start_adv_worker);
+	dw_wakeup(uwb);
 
 	dw3xxx_configure_device(uwb, RANGING_RESPONDER, HRP_UWB_PHY_CHANNEL_9);
 	/* Very important the the dw3000 irq is enabled after configuration */
