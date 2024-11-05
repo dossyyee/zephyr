@@ -72,10 +72,10 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME);
 static void dw_isr_processing_thread(void *, void *, void *);
 
 #define DW_ISR_THREAD_STACK_SIZE 	2048
-#define DW_ISR_THREAD_PRIO		1
+#define DW_ISR_THREAD_PRIO		0
 K_THREAD_DEFINE(dw_isr_thread_id, DW_ISR_THREAD_STACK_SIZE,
                 dw_isr_processing_thread, NULL, NULL, NULL,
-                DW_ISR_THREAD_PRIO, 0, CONFIG_SYS_CLOCK_TICKS_PER_SEC/5);
+                DW_ISR_THREAD_PRIO, 0, CONFIG_SYS_CLOCK_TICKS_PER_SEC/5); // TODO: programatically create this thread in the init function
 /* callbacks */
 // static void initiator_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data);
 // static void initiator_ranging_rx_to_cb(const dwt_cb_data_t *cb_data);
@@ -613,7 +613,7 @@ static void initiator_ranging_rx_err(void)
 static void initiator_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 {
 	(void)cb_data;
-	k_poll_signal_raise(&dw_isr_sig, INITIATOR_RXOK);
+	k_poll_signal_raise(&dw_isr_sig, INITIATOR_TXDONE);
 }
 static void initiator_ranging_tx_done(void)
 {
@@ -631,16 +631,22 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 
 	data->rx_count = 0;
 
+	/* Clear any unexpected signals */
+	k_poll_signal_reset(&data->rx_sig);
+	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+
+	/* Configure STS and start RX listeneing */
 	dwt_configurestsiv(&sts_iv);
 	dwt_configurestsloadiv();
 	dwt_setrxtimeout(0);
 	dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
-	// Wait for rx event for timeout (in ticks)
+	/* Wait for rx event for timeout (in ticks) */
 	ret = k_poll(data->rng_event, 1, timeout);
 	k_poll_signal_check(&data->rx_sig, &signaled, &result);
 	k_poll_signal_reset(&data->rx_sig);
 	data->rng_event[0].state = K_POLL_STATE_NOT_READY;
+	// LOG_INF("1: %llu", k_uptime_ticks());
 
 	if (ret) {
 		LOG_ERR("Ranging Recieve Timeout %d", ret);
@@ -651,8 +657,9 @@ int run_responder(const struct device* dev, k_timeout_t timeout)
 		/* This means that the responding tx event have been scheduled and the rx timeout has been
 			set. At this point, wait for the final rx event. */
 		
-		k_poll(data->rng_event, 1, K_MSEC(2));
+		k_poll(data->rng_event, 1, K_MSEC(4));
 		k_poll_signal_check(&data->rx_sig, &signaled, &result);
+		// LOG_INF("2: %llu", k_uptime_ticks());
 
 		// k_poll(dw_isr_event, 1, K_MSEC(2));
 		// k_poll_signal_check(&dw_isr_sig, &signaled, &result);
@@ -699,6 +706,7 @@ static void responder_ranging_rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
 	(void)cb_data;
 	k_poll_signal_raise(&dw_isr_sig, RESPONDER_RXOK);
+	// LOG_INF("RXOK: %llu", k_uptime_ticks());
 }
 static void responder_ranging_rx_ok(void)
 {
@@ -728,6 +736,7 @@ static void responder_ranging_rx_ok(void)
 
 			data->rx_count = 1;
 			k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
+			// LOG_INF("1st Poll: %llu", k_uptime_ticks());
 
 		} else { /* second/final rx event instance*/
 			// resp_tx_ts = get_tx_timestamp_u64();
@@ -735,7 +744,7 @@ static void responder_ranging_rx_ok(void)
 			data->rx_count = 0;
 			k_poll_signal_raise(&data->rx_sig,RX_EVENT_OK);
 			// k_poll_signal_raise(&dw_isr_sig, RX_EVENT_OK);
-			LOG_ERR("2nd Polled");
+			// LOG_INF("2nd Polled: %llu", k_uptime_ticks());
 		}
 
 	} else {
@@ -748,6 +757,7 @@ static void responder_ranging_rx_to_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
 	k_poll_signal_raise(&dw_isr_sig, RESPONDER_RXTO);
+	// LOG_INF("RXTO: %llu", k_uptime_ticks());
 }
 static void responder_ranging_rx_to(void)
 {
@@ -760,6 +770,7 @@ static void responder_ranging_rx_err_cb(const dwt_cb_data_t *cb_data)
 {
     	(void)cb_data;
 	k_poll_signal_raise(&dw_isr_sig, RESPONDER_RXERR);
+	// LOG_INF("RXERR: %llu", k_uptime_ticks());
 }
 static void responder_ranging_rx_err(void)
 {
@@ -772,6 +783,7 @@ static void responder_ranging_tx_done_cb(const dwt_cb_data_t *cb_data)
 {
 	(void)cb_data;
 	k_poll_signal_raise(&dw_isr_sig, RESPONDER_TXDONE);
+	// LOG_INF("TODN: %llu", k_uptime_ticks());
 }
 static void responder_ranging_tx_done(void)
 {
@@ -784,6 +796,7 @@ static void dw_isr_processing_thread(void *, void *, void *)
 	int ret;
 	while (1) {
 		ret = k_poll(dw_isr_event, 1, K_FOREVER);
+		// LOG_INF("Sig: %llu", k_uptime_ticks());
 		if (ret) {
 			/* process the error */
 		}
@@ -833,6 +846,7 @@ static void dw_isr_processing_thread(void *, void *, void *)
 
 static void dw3xxx_hw_isr(const struct device* dev, struct gpio_callback* cb, uint32_t pins)
 {
+	// LOG_INF("isr: %llu", k_uptime_ticks());
 	dwt_isr();
 }
 

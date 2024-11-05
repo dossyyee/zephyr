@@ -55,7 +55,6 @@ static void long_scan_handler(struct k_work *work); /* Prime the list of devices
 static void stop_long_scan_handler(struct k_work *work); /* Reschedule the list priming */
 static void short_scan_handler(struct k_work *work); /* Short scan prior to ranging */
 static void stop_short_scan_handler(struct k_work *work); /* Reschedule the list priming */
-static void do_ranging_handler(struct k_work *work);
 static void do_ranging_thread(void *arg1, void *arg2, void *arg3);
 // static void prune_anchors_handler(struct k_work *work);/* Get rid of unheard from anchors */
 
@@ -73,7 +72,6 @@ static K_WORK_DELAYABLE_DEFINE(long_scan_work, long_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(stop_long_scan_work, stop_long_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(short_scan_work, short_scan_handler);
 static K_WORK_DELAYABLE_DEFINE(stop_short_scan_work, stop_short_scan_handler);
-static K_WORK_DELAYABLE_DEFINE(do_ranging_work, do_ranging_handler);
 // static K_WORK_DELAYABLE_DEFINE(prune_anchors_work, prune_anchors_handler);
 
 #define RANGING_STACK_SIZE	1024
@@ -135,6 +133,7 @@ static struct anchor anchor_list[ANCHOR_LIST_LEN] = {0}; /* A record of the near
 static struct quick_anchor shortlist[ANCHOR_SHORTLIST_LEN]; /* Passive scan updated, Ranked list of achors to range with */
 enum op_mode app_state = IDLE;
 static atomic_t CONNECTED = ATOMIC_INIT(0);
+uint64_t r_ts[3];	// Timestamps recieved from responder/tag
 struct k_poll_signal conn_sig;
 struct k_poll_signal write_complete_sig;
 struct k_poll_signal timestamp_indication_sig;
@@ -420,72 +419,6 @@ static void stop_short_scan_handler(struct k_work *work)
 	}
 }
 
-static void do_ranging_handler(struct k_work *work)
-{
-	int err;
-	/* Reschedule the next ranging event regardless of current system state */
-	k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
-
-	if (app_state != IDLE) {
-		/* Scanning is taking place. Do nothing.*/
-		return;
-	}
-
-	app_state = RANGING;
-
-	/* Attempt to connect to each of the devices in the shortlist in series until the
-	 * number of successfull range attempts reaches 3 or 4, or untill the end of the 
-	 * list is reached. */
-
-	/* Currently using the main list of anchors, not the ranked shortlist of anchors */
-
-	for (int i = 0; i < ANCHOR_LIST_LEN; i++) {
-		/* check if the anchor exists field is true. */
-		if (!anchor_list[i].exists) {
-			continue;
-		}
-		
-		/* 1. Start a connection */
-		err = bt_conn_le_create(&anchor_list[i].addr, conn_create_param, BT_LE_CONN_PARAM_DEFAULT, &curr_conn);
-		if (err) {
-			char addr_str[BT_ADDR_LE_STR_LEN];
-			bt_addr_le_to_str(&anchor_list[i].addr, addr_str, sizeof(addr_str));
-			LOG_ERR("Create conn to %s failed (%d). %s", addr_str, err, bt_hci_err_to_str(err));
-			break;
-		}
-		/* Wait until the device is connected */
-		// printk("Connection Status: %s\n", is_device_connected() == true ? "connected" : "disconnected");
-		err = k_poll(conn_event, 1, K_FOREVER);
-		// k_poll_signal_check(&conn_sig, &signaled, &result);
-		k_poll_signal_reset(&conn_sig);
-		conn_event[0].state = K_POLL_STATE_NOT_READY;
-		// printk("Connection Status: %s\n", is_device_connected() == true ? "connected" : "disconnected");
-
-		for (int j = 0; j < MAX_RANGING_ATTEMPTS; j++) {
-			/* Write to the counter characteristic */
-			
-			/* Write to the uwb counter */
-			/* Send a ranging command */
-			/* Read from the timestamp characteristic */
-		}
-		k_msleep(1000);
-
-		bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-
-		// printk("Attempt disconnect\n");
-		// err = k_poll(conn_event, 1, K_FOREVER);
-		// k_poll_signal_check(&conn_sig, &signaled, &result);
-		// k_poll_signal_reset(&conn_sig);
-		// conn_event[0].state = K_POLL_STATE_NOT_READY;
-
-		/* Wait until the device has disconnected. */
-		// while(is_device_connected()) {};
-	}
-
-	LOG_INF("Ranging attempted");
-	app_state = IDLE;
-}
-
 static void gatt_write_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_write_params *params)
 {
 	// LOG_INF("Write complete. Handle = %d", params->handle); // Is it really complete here?
@@ -519,11 +452,9 @@ static uint8_t notify_func(struct bt_conn *conn, struct bt_gatt_subscribe_params
 		return BT_GATT_ITER_STOP;
 	}
 
-	uint64_t ts[3];
+	memcpy(r_ts, data, length);
 
-	memcpy(ts, data, length);
-
-	LOG_INF("Timestamp: %llu %llu %llu", ts[0], ts[1], ts[2]);
+	// LOG_INF("Timestamp: %llu %llu %llu", r_ts[0], r_ts[1], r_ts[2]);
 	k_poll_signal_raise(&timestamp_indication_sig, 1);
 	return BT_GATT_ITER_CONTINUE;
 }
@@ -546,6 +477,8 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 		.single.offset = 0
 	};
 
+	uint64_t i_ts[3];
+	double Ra, Rb, Da, Db, tof, distance;
 	uint32_t uwb_counter = 0;
 	uint8_t rng_cmd = 0x01; // TODO: Change this to a defined constant in the rs.h file
 
@@ -613,16 +546,32 @@ static void do_ranging_thread(void *arg1, void *arg2, void *arg3)
 					err = run_initiator(uwb);
 					if (err) {
 						LOG_ERR("UWB initiator failed: %d", err);
-					} else {
-						LOG_INF("UWB initiator success");
+						continue;
 					}
 
 					/* Wait for the timestamp indication */
-					err = k_poll(ind_event, 1, K_FOREVER); // TODO: add timeout and error handling
+					k_poll(ind_event, 1, K_FOREVER); // TODO: add timeout and error handling
 					k_poll_signal_reset(&timestamp_indication_sig);
 					ind_event[0].state = K_POLL_STATE_NOT_READY;
 
-					// break; // Temporary break. Add check to see if ranging was successful.
+					if (!(r_ts[0] == 0 && r_ts[1] == 0)) {
+						/* get distance measurement */
+						dw3xxx_get_timestamp(uwb, i_ts);
+						// LOG_INF("R: %llu %llu %llu", r_ts[0], r_ts[1], r_ts[2]);
+						// LOG_INF("I: %llu %llu %llu", i_ts[0], i_ts[1], i_ts[2]);
+						// LOG_INF("Ra:%llu\tRb:%llu\tDa:%llu\tDb:%llu",(i_ts[1] - i_ts[0]),(r_ts[2] - r_ts[1]),(i_ts[2] - i_ts[1]),(r_ts[1] - r_ts[0]));
+						
+						Ra = (double)(i_ts[1] - i_ts[0]);
+						Rb = (double)(r_ts[2] - r_ts[1]);
+						Da = (double)(i_ts[2] - i_ts[1]);
+						Db = (double)(r_ts[1] - r_ts[0]);
+
+						tof = ((Ra * Rb - Da * Db) / (Ra + Rb + Da + Db)) * (1.0 / 499.2e6 / 128.0);
+						distance = tof * 299702547;
+
+						LOG_INF("Distance: %.3f", distance);
+						break;
+					}
 				}
 				
 				bt_conn_disconnect(curr_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
@@ -859,7 +808,6 @@ int main(void)
 	/* Start and schedule */
 	k_work_schedule(&long_scan_work, K_NO_WAIT);
 	k_work_schedule(&short_scan_work, K_NO_WAIT);
-	// k_work_schedule(&do_ranging_work, K_MSEC(RANGING_INTERVAL_MS));
 
 	return 0;
 }

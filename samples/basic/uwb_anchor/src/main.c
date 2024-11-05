@@ -33,6 +33,9 @@ LOG_MODULE_REGISTER(app);
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct device *uwb = DEVICE_DT_GET(DT_INST(0, qorvo_dw3xxx));
 
+#define RESONDER_RANGING_THREAD_STACK_SIZE 	2048
+#define RESONDER_RANGING_THREAD_PRIO		0
+
 /* 
  * The anchor will be in a peripheral role which only maintains one active connection to a tag.
  * The anchor uses extended advertising to 
@@ -46,8 +49,16 @@ static void start_ranging(void);
 static void key_changed(void);
 static void iv_changed(void);
 
+static void responder_ranging_thread(void *, void *, void *);
+
 /* ------------------------------------ Bluetooth Vairables --------------------------------------- */
 static K_WORK_DEFINE(start_adv_worker, start_adv);
+
+K_THREAD_DEFINE(responder_ranging_thread_id, RESONDER_RANGING_THREAD_STACK_SIZE,
+                responder_ranging_thread, NULL, NULL, NULL,
+                RESONDER_RANGING_THREAD_PRIO, 0, CONFIG_SYS_CLOCK_TICKS_PER_SEC/5);
+struct k_poll_signal rr_sig;
+struct k_poll_event rr_event[1];
 
 /* Connection */
 static struct bt_conn *my_conn = NULL;
@@ -120,41 +131,43 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 static void start_ranging(void)
 {
 	LOG_INF("Start Ranging");
+	k_poll_signal_raise(&rr_sig, 0);
+}
+
+static void responder_ranging_thread(void *, void *, void *)
+{
 	uint32_t key[STS_U32_LEN];
 	uint32_t iv[STS_U32_LEN];
 	uint64_t timestamp[3];
-
 	int err;
 
-	bt_rs_get_key(key);
-	bt_rs_get_iv(iv);
-	// printk("IV: 0x%08X 0x%08X 0x%08X 0x%08X\n", iv[0], iv[1], iv[2], iv[3]);
-	// printk("KEY: 0x%08X 0x%08X 0x%08X 0x%08X\n", key[0], key[1], key[2], key[3]);
-	/* Temporarily the key and iv should be updated here. It should already be consistant with the 
-	 * bluetooth service, but in case the callbacks have not been implemented or the key and iv have
-	* not been initiated yet */
+	while (1) {
+		k_poll(rr_event, 1, K_FOREVER);
+		k_poll_signal_reset(&rr_sig);
+		rr_event[0].state = K_POLL_STATE_NOT_READY;
 
-	dw3xxx_set_sts_key(uwb, key);
-	dw3xxx_set_sts_iv(uwb, iv);
+		bt_rs_get_key(key);
+		bt_rs_get_iv(iv);
+		// printk("IV: 0x%08X 0x%08X 0x%08X 0x%08X\n", iv[0], iv[1], iv[2], iv[3]);
+		// printk("KEY: 0x%08X 0x%08X 0x%08X 0x%08X\n", key[0], key[1], key[2], key[3]);
+		/* Temporarily the key and iv should be updated here. It should already be consistant with the 
+		* bluetooth service, but in case the callbacks have not been implemented or the key and iv have
+		* not been initiated yet */
 
+		dw3xxx_set_sts_key(uwb, key);
+		dw3xxx_set_sts_iv(uwb, iv);
 
-	// uint32_t tmp[STS_U32_LEN];
-	// dw3xxx_get_sts_iv(uwb, tmp);
-	// printk("IV: 0x%08X 0x%08X 0x%08X 0x%08X\n", tmp[0], tmp[1], tmp[2], tmp[3]);
-
-	// dw3xxx_get_sts_key(uwb, tmp);
-	// printk("KEY: 0x%08X 0x%08X 0x%08X 0x%08X\n", tmp[0], tmp[1], tmp[2], tmp[3]);
-
-	err = run_responder(uwb, K_MSEC(10));
-	if (err) {
-		memset(timestamp, 0x00, sizeof(timestamp));
-		bt_rs_set_timestamp(timestamp);
-		bt_rs_indicate_timestamp(my_conn);
-	} else {
-		LOG_INF("Ranging Successful");
-		dw3xxx_get_timestamp(uwb, timestamp);
-		bt_rs_set_timestamp(timestamp);
-		bt_rs_indicate_timestamp(my_conn);
+		err = run_responder(uwb, K_MSEC(60));
+		if (err) {
+			memset(timestamp, 0x00, sizeof(timestamp));
+			bt_rs_set_timestamp(timestamp);
+			bt_rs_indicate_timestamp(my_conn);
+		} else {
+			LOG_INF("Ranging Successful");
+			dw3xxx_get_timestamp(uwb, timestamp);
+			bt_rs_set_timestamp(timestamp);
+			bt_rs_indicate_timestamp(my_conn);
+		}
 	}
 }
 
@@ -186,6 +199,10 @@ static struct bt_gatt_cb gatt_callbacks = {
 int main(void)
 {
 	printk("Entering Main\n");
+
+	/* Ranging*/
+	k_poll_signal_init(&rr_sig);
+	k_poll_event_init(&rr_event[0], K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &rr_sig);
 
 	timing_init();
     	timing_start();

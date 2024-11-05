@@ -17,8 +17,8 @@
 /* Time periods to tune */
 #define PREAMBLE_HUNT 400        // Desired time for preamble hunt, can be minimised to zero
 #define TX_CFG_TIME 200           // Time of dw3000 to process TX start + a buffer period
-#define R_CPU_PROCESSING 398    // Time from interrupt reception to start tx command
-#define I_CPU_PROCESSING 442    // Time from interrupt reception to start tx command
+#define R_CPU_PROCESSING 498    // Time from interrupt reception to start tx command
+#define I_CPU_PROCESSING 542    // Time from interrupt reception to start tx command
 
 #define RX_TIMEOUT US_TO_UUS(500)          // Time after rx wakeup to call timout error
 #define PREAMBLE_TIMEOUT 4      // How mand PACs to wait and flag a timout
